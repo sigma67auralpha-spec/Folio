@@ -1,6 +1,27 @@
 # Folio — Private Local-First Android eBook Reader
 
+<p align="center">
+  <img src="src/assets/images/folio_app_icon_1795182333982.jpg" alt="Folio App Icon" width="96" />
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Platform-Android%207.0%2B-3DDC84?logo=android&logoColor=white" alt="Android 7.0+" />
+  <img src="https://img.shields.io/badge/Network-100%25%20Offline-4CAF50" alt="100% Offline" />
+  <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License" />
+  <a href="https://github.com/sigma67auralpha-spec/Folio-eBook-Reader/releases/latest">
+    <img src="https://img.shields.io/github/v/release/sigma67auralpha-spec/Folio-eBook-Reader?label=Download%20APK&color=orange" alt="Download Latest APK" />
+  </a>
+</p>
+
 **Folio** is a personal, 100% offline Android eBook reader and library built with **Kotlin** and **Jetpack Compose (Material Design 3)**. There are no accounts, no ads, no analytics, and no internet permissions — everything stays on your device.
+
+## Screenshots
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/sigma67auralpha-spec/Folio-eBook-Reader/main/screenshots/library.jpg" alt="Folio Library Screen" width="30%" />
+  <img src="https://raw.githubusercontent.com/sigma67auralpha-spec/Folio-eBook-Reader/main/screenshots/stats.jpg" alt="Folio Reading Journal & Streak Heatmap" width="30%" />
+  <img src="https://raw.githubusercontent.com/sigma67auralpha-spec/Folio-eBook-Reader/main/screenshots/settings.jpg" alt="Folio Personal Settings & Modular Toggles" width="30%" />
+</p>
 
 ## Supported Formats (12)
 
