@@ -1,0 +1,42 @@
+# IDE & Gradle
+*.iml
+.gradle/
+.kotlin/
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+
+# Build outputs
+/build/
+/app/build/
+/.build-outputs/
+/captures/
+.externalNativeBuild/
+.cxx/
+
+# Local environment & API keys (never commit real secrets)
+local.properties
+.env
+.env.*
+!.env.example
+google-services.json
+app/google-services.json
+
+# Signing keys & keystores (never commit upload or debug keystores)
+*.jks
+*.keystore
+*.p12
+*.pfx
+keystore.properties
+debug.keystore
+debug.keystore.base64
+my-upload-key.jks
+
+# Local artifacts & user-uploaded prompt attachments
+public/assets/aistudio/
+*.hprof
+*.log

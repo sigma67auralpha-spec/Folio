@@ -1,0 +1,6 @@
+{
+  "name": "Folio",
+  "description": "A private, local-first personal eBook reader and library supporting EPUB, PDF, MOBI, AZW3, FB2, DOCX, RTF, TXT, HTML, Markdown, CBZ, and CBR.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
