@@ -322,4 +322,11 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
             _statusMessage.value = res.getOrElse { "Export failed: ${it.localizedMessage}" }
         }
     }
+
+    fun resetReadingStats() {
+        viewModelScope.launch {
+            repository.resetReadingStats()
+            _statusMessage.value = "Reading stats cleared"
+        }
+    }
 }

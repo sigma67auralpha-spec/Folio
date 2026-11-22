@@ -11,4 +11,8 @@
     <string name="empty_library_title">Your personal shelf is ready</string>
     <string name="empty_library_subtitle">Import EPUB, PDF, MOBI, AZW3, FB2, DOCX, RTF, TXT, HTML, Markdown, or CBZ/CBR files—100% local and private.</string>
     <string name="privacy_badge">100% Offline • Zero Accounts • Local-First</string>
+    <string name="widget_streak_name">Reading Streak</string>
+    <string name="widget_streak_desc">Track your daily reading streak, green activity heatmap, and total time read right from your home screen.</string>
+    <string name="widget_continue_name">Continue Reading</string>
+    <string name="widget_continue_desc">Jump straight back into your current book alongside your active reading streak.</string>
 </resources>

@@ -27,6 +27,34 @@ val JetBrainsMonoFontFamily = FontFamily(
     Font(R.font.jetbrains_mono, FontWeight.Normal)
 )
 
+val OpenSansFontFamily = FontFamily(
+    Font(R.font.open_sans, FontWeight.Normal)
+)
+
+val LoraFontFamily = FontFamily(
+    Font(R.font.lora, FontWeight.Normal)
+)
+
+val EbGaramondFontFamily = FontFamily(
+    Font(R.font.eb_garamond, FontWeight.Normal)
+)
+
+val RobotoSerifFontFamily = FontFamily(
+    Font(R.font.roboto_serif, FontWeight.Normal)
+)
+
+val RobotoSlabFontFamily = FontFamily(
+    Font(R.font.roboto_slab, FontWeight.Normal)
+)
+
+val NunitoFontFamily = FontFamily(
+    Font(R.font.nunito, FontWeight.Normal)
+)
+
+val LexendFontFamily = FontFamily(
+    Font(R.font.lexend, FontWeight.Normal)
+)
+
 val FolioTypography = Typography(
     displaySmall = TextStyle(
         fontFamily = LiterataFontFamily,

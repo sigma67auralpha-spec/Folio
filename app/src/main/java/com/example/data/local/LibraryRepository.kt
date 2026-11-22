@@ -19,8 +19,11 @@ import com.example.data.model.TagEntity
 import com.example.data.model.WatchedFolderEntity
 import com.example.engine.BackupManager
 import com.example.engine.BookParser
+import com.example.widget.FolioWidgetUpdater
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.security.MessageDigest
@@ -32,6 +35,7 @@ class LibraryRepository(
     private val booksDir = File(context.filesDir, "books").apply { mkdirs() }
     private val coversDir = File(context.filesDir, "covers").apply { mkdirs() }
     private val fontsDir = File(context.filesDir, "fonts").apply { mkdirs() }
+    private val readingTimeMutex = Mutex()
 
     val booksWithRelations: Flow<List<BookWithRelations>> = dao.observeBooksWithRelations()
     val shelves: Flow<List<ShelfEntity>> = dao.observeShelves()
@@ -118,6 +122,7 @@ class LibraryRepository(
                 SingleImportStatus.UNSUPPORTED -> unsupported++
             }
         }
+        if (added > 0) FolioWidgetUpdater.requestUpdate(context)
         ImportResult(added, skippedDuplicates, unsupported)
     }
 
@@ -180,6 +185,7 @@ class LibraryRepository(
                 }
             }
         }
+        if (added > 0) FolioWidgetUpdater.requestUpdate(context)
         return ImportResult(added, duplicates, unsupported)
     }
 
@@ -341,6 +347,7 @@ class LibraryRepository(
             val tagId = existing?.id ?: dao.insertTag(TagEntity(name = rawTag))
             dao.insertBookTagRef(BookTagCrossRef(book.id, tagId))
         }
+        FolioWidgetUpdater.requestUpdate(context)
     }
 
     suspend fun setBookShelves(bookId: Long, shelfIds: Set<Long>) = withContext(Dispatchers.IO) {
@@ -366,6 +373,7 @@ class LibraryRepository(
             book.coverPath?.let { runCatching { File(it).delete() } }
         }
         dao.deleteBook(book)
+        FolioWidgetUpdater.requestUpdate(context)
     }
 
     suspend fun saveProgress(bookId: Long, unit: Int, totalUnits: Int, scrollFraction: Float) = withContext(Dispatchers.IO) {
@@ -381,19 +389,35 @@ class LibraryRepository(
             else -> ReadStatus.UNREAD
         }
         dao.updateProgress(bookId, unit, scrollFraction, pct, status, System.currentTimeMillis())
+        FolioWidgetUpdater.requestUpdate(context, throttled = true)
     }
 
-    suspend fun recordReadingTime(bookId: Long, deltaSeconds: Long) = withContext(Dispatchers.IO) {
-        if (deltaSeconds <= 0) return@withContext
-        dao.addReadingSeconds(bookId, deltaSeconds)
-        val now = System.currentTimeMillis()
-        val epochDay = (now + java.util.TimeZone.getDefault().getOffset(now)) / 86_400_000L
-        val existing = dao.findSession(bookId, epochDay)
-        if (existing != null) {
-            dao.incrementSession(existing.id, deltaSeconds)
-        } else {
-            dao.insertSession(ReadingSessionEntity(bookId = bookId, epochDay = epochDay, durationSeconds = deltaSeconds))
+    suspend fun recordReadingTime(bookId: Long, deltaSeconds: Long, forceWidgetUpdate: Boolean = false) = withContext(Dispatchers.IO) {
+        val safeDelta = deltaSeconds.coerceIn(0L, 120L)
+        if (safeDelta <= 0L) {
+            if (forceWidgetUpdate) FolioWidgetUpdater.requestUpdate(context, throttled = false)
+            return@withContext
         }
+        readingTimeMutex.withLock {
+            dao.addReadingSeconds(bookId, safeDelta)
+            val now = System.currentTimeMillis()
+            val epochDay = (now + java.util.TimeZone.getDefault().getOffset(now)) / 86_400_000L
+            val existing = dao.findSession(bookId, epochDay)
+            if (existing != null) {
+                dao.incrementSession(existing.id, safeDelta)
+            } else {
+                dao.insertSession(ReadingSessionEntity(bookId = bookId, epochDay = epochDay, durationSeconds = safeDelta))
+            }
+        }
+        FolioWidgetUpdater.requestUpdate(context, throttled = !forceWidgetUpdate)
+    }
+
+    suspend fun resetReadingStats() = withContext(Dispatchers.IO) {
+        readingTimeMutex.withLock {
+            dao.clearAllReadingSessions()
+            dao.resetAllBookReadingSeconds()
+        }
+        FolioWidgetUpdater.requestUpdate(context)
     }
 
     suspend fun addHighlight(
@@ -446,7 +470,9 @@ class LibraryRepository(
     }
 
     suspend fun restoreBackup(srcUri: Uri): Result<String> = withContext(Dispatchers.IO) {
-        BackupManager.restoreBackupZip(context, dao, srcUri)
+        val res = BackupManager.restoreBackupZip(context, dao, srcUri)
+        if (res.isSuccess) FolioWidgetUpdater.requestUpdate(context)
+        res
     }
 
     suspend fun exportBookNotesMarkdown(book: BookEntity, destUri: Uri): Result<String> = withContext(Dispatchers.IO) {

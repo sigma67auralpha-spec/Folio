@@ -126,19 +126,34 @@ object MobiParser {
     }
 
     private fun decompressPalmDoc(data: ByteArray): ByteArray {
-        val out = ByteArrayOutputStream(data.size * 2)
+        var buf = ByteArray(maxOf(4096, data.size * 3))
+        var len = 0
+        fun ensureCapacity(extra: Int) {
+            if (len + extra <= buf.size) return
+            val nextCap = maxOf(buf.size * 2, len + extra + 1024)
+            buf = buf.copyOf(nextCap)
+        }
+
         var i = 0
         while (i < data.size) {
             val b = data[i].toInt() and 0xFF
             i++
             when {
-                b == 0 -> out.write(0)
+                b == 0 -> {
+                    ensureCapacity(1)
+                    buf[len++] = 0
+                }
                 b in 1..8 -> {
                     val count = b.coerceAtMost(data.size - i)
-                    out.write(data, i, count)
+                    ensureCapacity(count)
+                    System.arraycopy(data, i, buf, len, count)
+                    len += count
                     i += count
                 }
-                b in 0x09..0x7F -> out.write(b)
+                b in 0x09..0x7F -> {
+                    ensureCapacity(1)
+                    buf[len++] = b.toByte()
+                }
                 b in 0x80..0xBF -> {
                     if (i >= data.size) break
                     val next = data[i].toInt() and 0xFF
@@ -146,22 +161,23 @@ object MobiParser {
                     val pair = (b shl 8) or next
                     val distance = (pair shr 3) and 0x07FF
                     val length = (pair and 0x07) + 3
-                    val currentBytes = out.toByteArray()
-                    val startPos = currentBytes.size - distance
+                    val startPos = len - distance
                     if (distance > 0 && startPos >= 0) {
+                        ensureCapacity(length)
                         for (k in 0 until length) {
                             val idx = startPos + (k % distance)
-                            if (idx in currentBytes.indices) out.write(currentBytes[idx].toInt())
+                            if (idx in 0 until len) buf[len++] = buf[idx]
                         }
                     }
                 }
                 else -> {
-                    out.write(' '.code)
-                    out.write(b xor 0x80)
+                    ensureCapacity(2)
+                    buf[len++] = ' '.code.toByte()
+                    buf[len++] = (b xor 0x80).toByte()
                 }
             }
         }
-        return out.toByteArray()
+        return buf.copyOf(len)
     }
 
     private fun readUInt16(bytes: ByteArray, offset: Int): Int =

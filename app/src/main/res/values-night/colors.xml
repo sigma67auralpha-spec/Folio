@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="widget_bg">#FF171819</color>
+    <color name="widget_border">#FF2B2D30</color>
+    <color name="widget_pill_bg">#FF232528</color>
+    <color name="widget_streak_pill_bg">#FF163522</color>
+    <color name="widget_streak_pill_ink">#FF4ADE80</color>
+    <color name="widget_ink_primary">#FFEFEAE2</color>
+    <color name="widget_ink_secondary">#FFA19A90</color>
+    <color name="widget_accent">#FFE08B5A</color>
+    <color name="widget_progress_track">#FF2B2D30</color>
+</resources>

@@ -14,10 +14,7 @@ object BookParser {
 
     fun parseMetadataAndCover(context: Context, file: File, format: BookFormat, fallbackTitle: String): ParsedMetadata {
         return when (format) {
-            BookFormat.EPUB -> when (val res = EpubParser.parse(file, fallbackTitle)) {
-                is ParsedBookContent.Reflowable -> res.metadata
-                is ParsedBookContent.Error -> ParsedMetadata(title = fallbackTitle)
-            }
+            BookFormat.EPUB -> EpubParser.parseMetadataOnly(file, fallbackTitle)
             BookFormat.MOBI, BookFormat.AZW3 -> when (val res = MobiParser.parse(file, fallbackTitle)) {
                 is ParsedBookContent.Reflowable -> res.metadata
                 is ParsedBookContent.Error -> ParsedMetadata(title = fallbackTitle)
@@ -44,9 +41,23 @@ object BookParser {
         file: File,
         format: BookFormat,
         fallbackTitle: String,
-        imageCacheDir: File? = null
+        imageCacheDir: File? = null,
+        cacheKey: String? = null,
+        diskCacheFile: File? = null
     ): ParsedBookContent {
-        return when (format) {
+        if (!cacheKey.isNullOrBlank()) {
+            BookCache.getFromMemory(cacheKey)?.let { return it }
+        }
+        if (diskCacheFile != null) {
+            BookCache.readFromDisk(diskCacheFile)?.let { cached ->
+                if (cached.chapters.isNotEmpty()) {
+                    if (!cacheKey.isNullOrBlank()) BookCache.putInMemory(cacheKey, cached)
+                    return cached
+                }
+            }
+        }
+
+        val parsed = when (format) {
             BookFormat.EPUB -> EpubParser.parse(file, fallbackTitle, imageCacheDir)
             BookFormat.MOBI, BookFormat.AZW3 -> MobiParser.parse(file, fallbackTitle)
             BookFormat.DOCX -> DocxRtfFb2Parser.parseDocx(file, fallbackTitle)
@@ -58,6 +69,12 @@ object BookParser {
             BookFormat.PDF, BookFormat.CBZ, BookFormat.CBR ->
                 ParsedBookContent.Error("Format ${format.displayName} uses dedicated page renderer.")
         }
+
+        if (parsed is ParsedBookContent.Reflowable && parsed.chapters.isNotEmpty()) {
+            if (!cacheKey.isNullOrBlank()) BookCache.putInMemory(cacheKey, parsed)
+            if (diskCacheFile != null) BookCache.writeToDisk(diskCacheFile, parsed)
+        }
+        return parsed
     }
 
     private fun extractPdfMetadata(file: File, fallbackTitle: String): ParsedMetadata {
@@ -109,17 +126,30 @@ object BookParser {
     }
 
     private fun extractCbrMetadata(file: File, fallbackTitle: String): ParsedMetadata {
-        val entries = ComicArchiveHelper.listRarStoredImages(file)
-        val coverBytes = entries.firstOrNull()?.let { compressThumbnail(it.bytes) }
+        val headers = ComicArchiveHelper.listRarStoredHeaders(file)
+        val coverBmp = if (headers.isNotEmpty()) ComicArchiveHelper.loadCbrPageBitmap(file, 0) else null
+        val coverBytes = coverBmp?.let { bmp ->
+            ByteArrayOutputStream().use { out ->
+                bmp.compress(Bitmap.CompressFormat.JPEG, 80, out)
+                bmp.recycle()
+                out.toByteArray()
+            }
+        }
         return ParsedMetadata(
             title = fallbackTitle,
-            totalUnits = entries.size.coerceAtLeast(1),
+            totalUnits = headers.size.coerceAtLeast(1),
             coverBytes = coverBytes
         )
     }
 
     private fun compressThumbnail(raw: ByteArray): ByteArray? {
-        val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(raw, 0, raw.size, bounds)
+        var sample = 2
+        while (bounds.outWidth / sample > 600 || bounds.outHeight / sample > 900) {
+            sample *= 2
+        }
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
         val bmp = BitmapFactory.decodeByteArray(raw, 0, raw.size, opts) ?: return null
         return ByteArrayOutputStream().use { out ->
             bmp.compress(Bitmap.CompressFormat.JPEG, 80, out)

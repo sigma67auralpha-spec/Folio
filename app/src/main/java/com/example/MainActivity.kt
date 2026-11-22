@@ -1,5 +1,6 @@
 package com.example
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -64,13 +65,43 @@ import com.example.ui.screens.ShelvesScreen
 import com.example.ui.screens.StatsScreen
 import com.example.ui.theme.FolioTheme
 import com.example.ui.viewmodel.LibraryViewModel
+import com.example.widget.FolioWidgetUpdater
+
+data class WidgetNavRequest(
+    val seq: Long,
+    val tabRoute: String? = null,
+    val bookId: Long? = null
+)
 
 class MainActivity : ComponentActivity() {
+    private var widgetNavState by mutableStateOf<WidgetNavRequest?>(null)
+    private var navSeq = 0L
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        consumeWidgetIntent(intent)
         setContent {
-            FolioAppRoot()
+            FolioAppRoot(widgetNavRequest = widgetNavState)
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        consumeWidgetIntent(intent)
+    }
+
+    private fun consumeWidgetIntent(intent: Intent?) {
+        intent ?: return
+        val tab = intent.getStringExtra(FolioWidgetUpdater.EXTRA_OPEN_TAB)
+        val bookId = intent.getLongExtra(FolioWidgetUpdater.EXTRA_OPEN_BOOK_ID, -1L)
+        if (tab == FolioWidgetUpdater.TAB_STATS) {
+            widgetNavState = WidgetNavRequest(seq = ++navSeq, tabRoute = FolioTab.STATS.route)
+            intent.removeExtra(FolioWidgetUpdater.EXTRA_OPEN_TAB)
+        } else if (bookId > 0L) {
+            widgetNavState = WidgetNavRequest(seq = ++navSeq, bookId = bookId)
+            intent.removeExtra(FolioWidgetUpdater.EXTRA_OPEN_BOOK_ID)
         }
     }
 }
@@ -89,6 +120,7 @@ private enum class FolioTab(
 
 @Composable
 fun FolioAppRoot(
+    widgetNavRequest: WidgetNavRequest? = null,
     libraryViewModel: LibraryViewModel = viewModel()
 ) {
     val state by libraryViewModel.uiState.collectAsStateWithLifecycle()
@@ -99,6 +131,24 @@ fun FolioAppRoot(
         val navBackStack by navController.currentBackStackEntryAsState()
         val currentRoute = navBackStack?.destination?.route ?: FolioTab.LIBRARY.route
         val isReaderRoute = currentRoute.startsWith("reader/")
+
+        LaunchedEffect(widgetNavRequest?.seq) {
+            val req = widgetNavRequest ?: return@LaunchedEffect
+            when {
+                req.bookId != null -> {
+                    navController.navigate("reader/${req.bookId}") {
+                        launchSingleTop = true
+                    }
+                }
+                req.tabRoute == FolioTab.STATS.route -> {
+                    navController.navigate(FolioTab.STATS.route) {
+                        popUpTo(FolioTab.LIBRARY.route) { saveState = true }
+                        launchSingleTop = true
+                        restoreState = true
+                    }
+                }
+            }
+        }
 
         val snackbarHostState = remember { SnackbarHostState() }
         var editingBook by remember { mutableStateOf<BookWithRelations?>(null) }
@@ -287,7 +337,8 @@ fun FolioAppRoot(
                                 },
                                 onRestoreBackup = {
                                     restoreBackupLauncher.launch(arrayOf("application/zip", "*/*"))
-                                }
+                                },
+                                onResetStats = { libraryViewModel.resetReadingStats() }
                             )
                         }
 

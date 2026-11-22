@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="FolioWidgetContainer">
+        <item name="android:background">@drawable/widget_card_bg</item>
+    </style>
+</resources>

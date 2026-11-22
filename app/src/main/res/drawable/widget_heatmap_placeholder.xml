@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="220dp"
+    android:height="72dp"
+    android:viewportWidth="220"
+    android:viewportHeight="72">
+    <path android:fillColor="#44777777" android:pathData="M4,8 h12 v12 h-12 z M20,8 h12 v12 h-12 z M36,8 h12 v12 h-12 z M52,8 h12 v12 h-12 z" />
+    <path android:fillColor="#2EA043" android:pathData="M68,8 h12 v12 h-12 z M84,8 h12 v12 h-12 z M132,8 h12 v12 h-12 z M164,8 h12 v12 h-12 z" />
+    <path android:fillColor="#4ADE80" android:pathData="M100,8 h12 v12 h-12 z M116,8 h12 v12 h-12 z M148,8 h12 v12 h-12 z M180,8 h12 v12 h-12 z M196,8 h12 v12 h-12 z" />
+
+    <path android:fillColor="#215E33" android:pathData="M4,24 h12 v12 h-12 z M36,24 h12 v12 h-12 z M68,24 h12 v12 h-12 z" />
+    <path android:fillColor="#39C555" android:pathData="M20,24 h12 v12 h-12 z M52,24 h12 v12 h-12 z M84,24 h12 v12 h-12 z M116,24 h12 v12 h-12 z M148,24 h12 v12 h-12 z M180,24 h12 v12 h-12 z M196,24 h12 v12 h-12 z" />
+    <path android:fillColor="#44777777" android:pathData="M100,24 h12 v12 h-12 z M132,24 h12 v12 h-12 z M164,24 h12 v12 h-12 z" />
+
+    <path android:fillColor="#2EA043" android:pathData="M4,40 h12 v12 h-12 z M20,40 h12 v12 h-12 z M52,40 h12 v12 h-12 z M100,40 h12 v12 h-12 z M132,40 h12 v12 h-12 z M164,40 h12 v12 h-12 z" />
+    <path android:fillColor="#4ADE80" android:pathData="M36,40 h12 v12 h-12 z M68,40 h12 v12 h-12 z M84,40 h12 v12 h-12 z M116,40 h12 v12 h-12 z M148,40 h12 v12 h-12 z M180,40 h12 v12 h-12 z M196,40 h12 v12 h-12 z" />
+
+    <path android:fillColor="#215E33" android:pathData="M4,56 h12 v12 h-12 z M36,56 h12 v12 h-12 z M84,56 h12 v12 h-12 z M116,56 h12 v12 h-12 z" />
+    <path android:fillColor="#39C555" android:pathData="M20,56 h12 v12 h-12 z M68,56 h12 v12 h-12 z M100,56 h12 v12 h-12 z M148,56 h12 v12 h-12 z M180,56 h12 v12 h-12 z M196,56 h12 v12 h-12 z" />
+    <path android:fillColor="#44777777" android:pathData="M52,56 h12 v12 h-12 z M132,56 h12 v12 h-12 z M164,56 h12 v12 h-12 z" />
+</vector>

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -83,15 +84,18 @@ fun StatsScreen(
     state: LibraryUiState,
     modifier: Modifier = Modifier
 ) {
-    val totalSeconds = state.allBooks.sumOf { it.book.totalReadingSeconds }
-    val finishedCount = state.allBooks.count { it.book.readStatus == ReadStatus.FINISHED }
-    val totalHighlights = state.allBooks.sumOf { it.highlights.size }
-    val todayEpoch = currentLocalEpochDay()
-
     val dailyTotals = remember(state.sessions) {
         state.sessions.groupBy { it.epochDay }
             .mapValues { (_, list) -> list.sumOf { it.durationSeconds } }
     }
+    val totalSeconds = remember(state.sessions, state.allBooks) {
+        val fromSessions = state.sessions.sumOf { it.durationSeconds }
+        val fromBooks = state.allBooks.sumOf { it.book.totalReadingSeconds }
+        if (fromSessions > 0L) fromSessions else fromBooks
+    }
+    val finishedCount = state.allBooks.count { it.book.readStatus == ReadStatus.FINISHED }
+    val totalHighlights = state.allBooks.sumOf { it.highlights.size }
+    val todayEpoch = currentLocalEpochDay()
 
     val (streak, bestStreak) = remember(dailyTotals, todayEpoch) {
         calculateStreaks(dailyTotals, todayEpoch)
@@ -343,11 +347,14 @@ private fun StreakHeatmapCard(
                         horizontalArrangement = Arrangement.spacedBy(gap)
                     ) {
                         for (col in 0 until weekCount) {
-                            Column(verticalArrangement = Arrangement.spacedBy(gap)) {
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(gap)
+                            ) {
                                 for (row in 0 until 7) {
                                     val dayEpoch = startMonday + col * 7L + row
                                     if (dayEpoch > todayEpoch) {
-                                        Spacer(modifier = Modifier.size(cellSize))
+                                        Spacer(modifier = Modifier.fillMaxWidth().aspectRatio(1f))
                                     } else {
                                         val seconds = dailyTotals[dayEpoch] ?: 0L
                                         val tileColor = when {
@@ -360,7 +367,8 @@ private fun StreakHeatmapCard(
                                         val isSelected = selectedDay == dayEpoch
                                         Box(
                                             modifier = Modifier
-                                                .size(cellSize)
+                                                .fillMaxWidth()
+                                                .aspectRatio(1f)
                                                 .clip(RoundedCornerShape(3.5.dp))
                                                 .background(tileColor)
                                                 .then(

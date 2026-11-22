@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.Typeface
@@ -15,13 +16,15 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -36,6 +39,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -93,11 +97,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -105,7 +115,10 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.SpanStyle
@@ -121,25 +134,43 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import com.example.data.model.DoubleTapAction
 import com.example.data.model.FormatCategory
+import com.example.data.model.HighlightColor
 import com.example.data.model.HighlightEntity
+import com.example.data.model.HorizontalGestureMode
+import com.example.data.model.ImageColorEffect
 import com.example.data.model.OrientationLock
 import com.example.data.model.PageAnimation
+import com.example.data.model.ProgressDisplayMode
 import com.example.data.model.ReaderFont
 import com.example.data.model.ReaderPreferences
+import com.example.data.model.ReaderTextAlignment
 import com.example.data.model.ReaderThemeMode
 import com.example.data.model.TapZonePreset
+import com.example.data.model.defaultReaderColorPresets
 import com.example.engine.BlockStyle
 import com.example.engine.TextRun
 import com.example.ui.components.HighlightNoteDialog
 import com.example.ui.components.ReaderControlsSheet
 import com.example.ui.components.ReaderIndexAndNotesSheet
+import com.example.ui.theme.EbGaramondFontFamily
 import com.example.ui.theme.JetBrainsMonoFontFamily
+import com.example.ui.theme.LexendFontFamily
 import com.example.ui.theme.LiterataFontFamily
+import com.example.ui.theme.LoraFontFamily
 import com.example.ui.theme.MerriweatherFontFamily
+import com.example.ui.theme.NunitoFontFamily
+import com.example.ui.theme.OpenSansFontFamily
 import com.example.ui.theme.PlusJakartaFontFamily
 import com.example.ui.theme.ReaderAmoledBg
 import com.example.ui.theme.ReaderAmoledInk
@@ -149,6 +180,8 @@ import com.example.ui.theme.ReaderSepiaBg
 import com.example.ui.theme.ReaderSepiaInk
 import com.example.ui.theme.ReaderSlateBg
 import com.example.ui.theme.ReaderSlateInk
+import com.example.ui.theme.RobotoSerifFontFamily
+import com.example.ui.theme.RobotoSlabFontFamily
 import com.example.ui.viewmodel.ReaderContentState
 import com.example.ui.viewmodel.ReaderViewModel
 import kotlinx.coroutines.delay
@@ -157,7 +190,32 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.roundToInt
+
+internal fun bionicWordRanges(text: String): List<IntRange> {
+    if (text.isEmpty()) return emptyList()
+    val ranges = mutableListOf<IntRange>()
+    var i = 0
+    val n = text.length
+    while (i < n) {
+        if (Character.isLetterOrDigit(text[i])) {
+            val start = i
+            while (i < n && Character.isLetterOrDigit(text[i])) i++
+            val len = i - start
+            val boldLen = when {
+                len <= 1 -> 1
+                len <= 3 -> 1
+                len <= 6 -> 2
+                else -> (len * 0.45f).roundToInt().coerceIn(2, len - 1)
+            }
+            ranges.add(start until (start + boldLen))
+        } else {
+            i++
+        }
+    }
+    return ranges
+}
 
 @Composable
 fun ReaderScreen(
@@ -167,6 +225,25 @@ fun ReaderScreen(
 ) {
     LaunchedEffect(bookId) {
         readerViewModel.loadBook(bookId)
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, bookId) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> readerViewModel.setReaderForeground(true)
+                Lifecycle.Event.ON_PAUSE -> readerViewModel.setReaderForeground(false)
+                else -> Unit
+            }
+        }
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            readerViewModel.setReaderForeground(true)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            readerViewModel.setReaderForeground(false)
+        }
     }
 
     val book by readerViewModel.book.collectAsStateWithLifecycle()
@@ -189,12 +266,14 @@ fun ReaderScreen(
     var pendingHighlightTarget by remember { mutableStateOf<Triple<Int, Int, String>?>(null) }
     var editingHighlight by remember { mutableStateOf<HighlightEntity?>(null) }
     var brightnessToast by remember { mutableStateOf<Float?>(null) }
+    var presetToast by remember { mutableStateOf<String?>(null) }
     var restoredInitialScroll by remember(bookId) { mutableStateOf(false) }
     var previousUnit by remember(bookId) { mutableIntStateOf(-1) }
 
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
     val view = LocalView.current
+    val density = LocalDensity.current
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
     val focusRequester = remember { FocusRequester() }
@@ -210,6 +289,13 @@ fun ReaderScreen(
         toastMsg?.let {
             snackbarHostState.showSnackbar(it)
             readerViewModel.clearToast()
+        }
+    }
+
+    LaunchedEffect(presetToast) {
+        if (presetToast != null) {
+            delay(1300L)
+            presetToast = null
         }
     }
 
@@ -231,9 +317,33 @@ fun ReaderScreen(
         }
     }
 
+    LaunchedEffect(listState.isScrollInProgress, prefs.hideBarsOnFastScroll) {
+        if (prefs.hideBarsOnFastScroll && listState.isScrollInProgress && showOverlay && !showSearchBar) {
+            showOverlay = false
+        }
+    }
+
     DisposableEffect(prefs.keepScreenAwake) {
         view.keepScreenOn = prefs.keepScreenAwake
         onDispose { view.keepScreenOn = false }
+    }
+
+    DisposableEffect(prefs.fullscreenMode) {
+        val window = (context as? Activity)?.window
+        if (window != null) {
+            val controller = WindowCompat.getInsetsController(window, view)
+            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            if (prefs.fullscreenMode) {
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+            } else {
+                controller.show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+        onDispose {
+            if (window != null) {
+                WindowCompat.getInsetsController(window, view).show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
     }
 
     DisposableEffect(prefs.orientationLock) {
@@ -241,8 +351,11 @@ fun ReaderScreen(
         if (activity != null) {
             activity.requestedOrientation = when (prefs.orientationLock) {
                 OrientationLock.SYSTEM -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-                OrientationLock.PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                OrientationLock.LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                OrientationLock.FREE -> ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+                OrientationLock.PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+                OrientationLock.LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                OrientationLock.LOCKED_PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                OrientationLock.LOCKED_LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
             }
         }
         onDispose {
@@ -250,12 +363,16 @@ fun ReaderScreen(
         }
     }
 
-    DisposableEffect(prefs.screenBrightness) {
+    DisposableEffect(prefs.customBrightnessEnabled, prefs.screenBrightness) {
         val window = (context as? Activity)?.window
         val original = window?.attributes?.screenBrightness ?: -1f
-        if (window != null && prefs.screenBrightness >= 0f) {
+        if (window != null) {
             val lp = window.attributes
-            lp.screenBrightness = prefs.screenBrightness.coerceIn(0.05f, 1f)
+            lp.screenBrightness = if (prefs.customBrightnessEnabled) {
+                prefs.screenBrightness.coerceIn(0.05f, 1f)
+            } else {
+                original
+            }
             window.attributes = lp
         }
         onDispose {
@@ -274,7 +391,12 @@ fun ReaderScreen(
         }
     }
 
+    LaunchedEffect(currentUnit, listState.firstVisibleItemIndex) {
+        readerViewModel.recordUserReadingActivity()
+    }
+
     BackHandler {
+        readerViewModel.setReaderForeground(false)
         readerViewModel.saveScrollProgress(scrollFraction)
         readerViewModel.ttsManager.stop()
         onBack()
@@ -351,28 +473,76 @@ fun ReaderScreen(
                 }
 
                 val transitionForward = currentUnit >= previousUnit
+                val readerInsetsModifier = when {
+                    prefs.cutoutMargin -> Modifier.windowInsetsPadding(WindowInsets.safeDrawing)
+                    prefs.fullscreenMode -> Modifier
+                    else -> Modifier.windowInsetsPadding(WindowInsets.navigationBars)
+                }
+                val swipeThresholdPx = with(density) { 72.dp.toPx() }
+                val chapterStartOffsets = remember(state.chapters) {
+                    var running = 0
+                    state.chapters.map { ch ->
+                        val start = running
+                        running += ch.blocks.size.coerceAtLeast(1)
+                        start
+                    }
+                }
+                val totalGlobalBlocks = remember(state.chapters) {
+                    state.chapters.sumOf { it.blocks.size.coerceAtLeast(1) }.coerceAtLeast(1)
+                }
+
+                var containerRootPos by remember { mutableStateOf(Offset.Zero) }
+                var containerWidthPx by remember { mutableFloatStateOf(1f) }
+                var containerHeightPx by remember { mutableFloatStateOf(1f) }
+                val handleReflowableTap: (Offset) -> Unit = { localOffset ->
+                    readerViewModel.recordUserReadingActivity()
+                    val w = containerWidthPx.coerceAtLeast(1f)
+                    val h = containerHeightPx.coerceAtLeast(1f)
+                    when (prefs.tapZonePreset) {
+                        TapZonePreset.CLASSIC_LR -> when {
+                            localOffset.x < w * 0.28f -> readerViewModel.previousUnit()
+                            localOffset.x > w * 0.72f -> readerViewModel.nextUnit()
+                            else -> showOverlay = !showOverlay
+                        }
+                        TapZonePreset.ONE_HAND_RIGHT -> when {
+                            localOffset.y < h * 0.30f -> readerViewModel.previousUnit()
+                            localOffset.x > w * 0.65f || localOffset.y > h * 0.72f -> readerViewModel.nextUnit()
+                            else -> showOverlay = !showOverlay
+                        }
+                        TapZonePreset.SCROLL_ONLY -> showOverlay = !showOverlay
+                    }
+                }
+
                 BoxWithConstraints(
                     modifier = Modifier
                         .fillMaxSize()
-                        .windowInsetsPadding(WindowInsets.safeDrawing)
+                        .then(readerInsetsModifier)
+                        .onGloballyPositioned { coords ->
+                            containerRootPos = coords.positionInRoot()
+                            containerWidthPx = coords.size.width.toFloat()
+                            containerHeightPx = coords.size.height.toFloat()
+                        }
                         .pointerInput(prefs.tapZonePreset) {
-                            detectTapGestures { offset ->
-                                val w = size.width.toFloat()
-                                val h = size.height.toFloat()
-                                when (prefs.tapZonePreset) {
-                                    TapZonePreset.CLASSIC_LR -> when {
-                                        offset.x < w * 0.28f -> readerViewModel.previousUnit()
-                                        offset.x > w * 0.72f -> readerViewModel.nextUnit()
-                                        else -> showOverlay = !showOverlay
+                            detectTapGestures { offset -> handleReflowableTap(offset) }
+                        }
+                        .pointerInput(prefs.horizontalGestureMode, swipeThresholdPx) {
+                            if (prefs.horizontalGestureMode == HorizontalGestureMode.OFF) return@pointerInput
+                            var totalDrag = 0f
+                            detectHorizontalDragGestures(
+                                onDragStart = { totalDrag = 0f },
+                                onHorizontalDrag = { _, dragAmount -> totalDrag += dragAmount },
+                                onDragEnd = {
+                                    if (abs(totalDrag) >= swipeThresholdPx) {
+                                        readerViewModel.recordUserReadingActivity()
+                                        val goNext = when (prefs.horizontalGestureMode) {
+                                            HorizontalGestureMode.NORMAL -> totalDrag < 0f
+                                            HorizontalGestureMode.INVERTED -> totalDrag > 0f
+                                            HorizontalGestureMode.OFF -> false
+                                        }
+                                        if (goNext) readerViewModel.nextUnit() else readerViewModel.previousUnit()
                                     }
-                                    TapZonePreset.ONE_HAND_RIGHT -> when {
-                                        offset.y < h * 0.30f -> readerViewModel.previousUnit()
-                                        offset.x > w * 0.65f || offset.y > h * 0.72f -> readerViewModel.nextUnit()
-                                        else -> showOverlay = !showOverlay
-                                    }
-                                    TapZonePreset.SCROLL_ONLY -> showOverlay = !showOverlay
                                 }
-                            }
+                            )
                         }
                 ) {
                     AnimatedContent(
@@ -395,6 +565,32 @@ fun ReaderScreen(
                         label = "chapter_transition"
                     ) { targetUnit ->
                         val chapter = state.chapters.getOrNull(targetUnit) ?: state.chapters.first()
+                        val chapterHighlightsByPara = remember(highlights, chapter.index) {
+                            highlights.filter { it.chapterIndex == chapter.index }
+                                .groupBy { it.paragraphIndex }
+                        }
+                        val imgColorFilter = remember(prefs.imageColorEffect, bgColor, inkColor) {
+                            when (prefs.imageColorEffect) {
+                                ImageColorEffect.OFF -> null
+                                ImageColorEffect.GRAYSCALE -> ColorFilter.colorMatrix(
+                                    ColorMatrix().apply { setToSaturation(0f) }
+                                )
+                                ImageColorEffect.TEXT_COLOR -> ColorFilter.tint(inkColor, BlendMode.Color)
+                                ImageColorEffect.BG_COLOR -> {
+                                    if (bgColor.luminance() < 0.2f) {
+                                        ColorFilter.colorMatrix(
+                                            ColorMatrix().apply {
+                                                setToSaturation(0.25f)
+                                                timesAssign(ColorMatrix().apply { setToScale(0.75f, 0.75f, 0.75f, 1f) })
+                                            }
+                                        )
+                                    } else {
+                                        ColorFilter.tint(bgColor, BlendMode.Multiply)
+                                    }
+                                }
+                            }
+                        }
+
                         Box(modifier = Modifier.fillMaxSize()) {
                             LazyColumn(
                                 state = listState,
@@ -402,33 +598,118 @@ fun ReaderScreen(
                                     start = prefs.horizontalMarginDp.dp,
                                     end = prefs.horizontalMarginDp.dp,
                                     top = prefs.verticalPaddingDp.dp + 12.dp,
-                                    bottom = 78.dp
+                                    bottom = (78f + prefs.bottomBarMarginDp).dp
                                 ),
                                 verticalArrangement = Arrangement.spacedBy(prefs.paragraphSpacingDp.dp),
                                 modifier = Modifier
                                     .widthIn(max = prefs.maxColumnWidthDp.dp)
                                     .align(Alignment.TopCenter)
                                     .fillMaxHeight()
-                            ) {
-                                itemsIndexed(chapter.blocks) { pIdx, block ->
-                                    val paraHighlights = highlights.filter {
-                                        it.chapterIndex == chapter.index && it.paragraphIndex == pIdx
+                                    .drawWithContent {
+                                        drawContent()
+                                        if (prefs.perceptionExpander) {
+                                            val xLeft = size.width * 0.14f
+                                            val xRight = size.width * 0.86f
+                                            val guideColor = inkColor.copy(alpha = 0.16f)
+                                            val strokePx = 1.2.dp.toPx()
+                                            drawLine(guideColor, Offset(xLeft, 0f), Offset(xLeft, size.height), strokeWidth = strokePx)
+                                            drawLine(guideColor, Offset(xRight, 0f), Offset(xRight, size.height), strokeWidth = strokePx)
+                                        }
                                     }
+                            ) {
+                                itemsIndexed(
+                                    items = chapter.blocks,
+                                    key = { pIdx, _ -> "${chapter.index}_$pIdx" }
+                                ) { pIdx, block ->
+                                    val paraHighlights = chapterHighlightsByPara[pIdx].orEmpty()
                                     val isTtsActive = ttsState.isSpeaking && ttsState.currentParagraphIndex == pIdx
-                                    if (block.style == BlockStyle.IMAGE && block.imagePath != null) {
-                                        val imgFile = File(block.imagePath)
-                                        if (imgFile.exists()) {
-                                            AsyncImage(
-                                                model = imgFile,
-                                                contentDescription = block.text,
-                                                contentScale = ContentScale.Fit,
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .heightIn(max = 360.dp)
-                                                    .clip(RoundedCornerShape(8.dp))
-                                            )
+                                    if (block.style == BlockStyle.IMAGE) {
+                                        val imgFile = block.imagePath?.let { File(it) }
+                                        if (prefs.showImages && imgFile != null && imgFile.exists()) {
+                                            val imgAlign = when (prefs.imageAlignment) {
+                                                ReaderTextAlignment.START -> Alignment.Start
+                                                ReaderTextAlignment.END -> Alignment.End
+                                                else -> Alignment.CenterHorizontally
+                                            }
+                                            val captionTextAlign = when (prefs.imageAlignment) {
+                                                ReaderTextAlignment.START -> TextAlign.Start
+                                                ReaderTextAlignment.END -> TextAlign.End
+                                                else -> TextAlign.Center
+                                            }
+                                            Column(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalAlignment = imgAlign
+                                            ) {
+                                                AsyncImage(
+                                                    model = imgFile,
+                                                    contentDescription = block.text,
+                                                    contentScale = ContentScale.Fit,
+                                                    colorFilter = imgColorFilter,
+                                                    modifier = Modifier
+                                                        .fillMaxWidth(prefs.imageWidthPercent.coerceIn(0.35f, 1.0f))
+                                                        .heightIn(max = 360.dp)
+                                                        .clip(RoundedCornerShape(prefs.imageCornerRadiusDp.dp))
+                                                )
+                                                if (prefs.showImageCaptions &&
+                                                    block.text.isNotBlank() &&
+                                                    !block.text.equals("image", ignoreCase = true) &&
+                                                    !block.text.equals("cover", ignoreCase = true)
+                                                ) {
+                                                    Spacer(Modifier.height(4.dp))
+                                                    Text(
+                                                        text = block.text,
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        fontStyle = FontStyle.Italic,
+                                                        color = inkColor.copy(alpha = 0.65f),
+                                                        textAlign = captionTextAlign,
+                                                        modifier = Modifier.fillMaxWidth(prefs.imageWidthPercent.coerceIn(0.35f, 1.0f))
+                                                    )
+                                                }
+                                            }
                                         }
                                     } else {
+                                        val doubleTapHandler: (() -> Unit)? = if (prefs.doubleTapAction == DoubleTapAction.OFF) {
+                                            null
+                                        } else {
+                                            {
+                                                readerViewModel.recordUserReadingActivity()
+                                                when (prefs.doubleTapAction) {
+                                                    DoubleTapAction.SPEAK_PARAGRAPH -> {
+                                                        if (ttsState.isSpeaking && ttsState.currentParagraphIndex == pIdx) {
+                                                            readerViewModel.ttsManager.stop()
+                                                        } else {
+                                                            val blocks = chapter.blocks.map { it.text }
+                                                            readerViewModel.ttsManager.updateVoiceParams(prefs.ttsRate, prefs.ttsPitch)
+                                                            readerViewModel.ttsManager.startReading(blocks, pIdx)
+                                                        }
+                                                    }
+                                                    DoubleTapAction.QUICK_HIGHLIGHT -> {
+                                                        if (prefs.enableHighlights) {
+                                                            readerViewModel.addHighlight(
+                                                                chapter.index,
+                                                                pIdx,
+                                                                block.text,
+                                                                "",
+                                                                HighlightColor.AMBER
+                                                            )
+                                                        }
+                                                    }
+                                                    DoubleTapAction.EXTERNAL_TRANSLATE -> {
+                                                        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                                            type = "text/plain"
+                                                            putExtra(Intent.EXTRA_TEXT, block.text)
+                                                        }
+                                                        val chooser = Intent.createChooser(sendIntent, "Translate paragraph with")
+                                                        runCatching { context.startActivity(chooser) }.onFailure {
+                                                            coroutineScope.launch {
+                                                                snackbarHostState.showSnackbar("No translator or text app available.")
+                                                            }
+                                                        }
+                                                    }
+                                                    DoubleTapAction.OFF -> Unit
+                                                }
+                                            }
+                                        }
                                         Column {
                                             ReflowableBlockView(
                                                 text = block.text,
@@ -439,11 +720,15 @@ fun ReaderScreen(
                                                 prefs = prefs,
                                                 fontFamily = readerFontFamily,
                                                 inkColor = inkColor,
+                                                onTapRoot = { rootOffset ->
+                                                    handleReflowableTap(rootOffset - containerRootPos)
+                                                },
                                                 onLongPress = {
                                                     if (prefs.enableHighlights) {
                                                         pendingHighlightTarget = Triple(chapter.index, pIdx, block.text)
                                                     }
-                                                }
+                                                },
+                                                onDoubleTap = doubleTapHandler
                                             )
                                             if (prefs.enableHighlights) {
                                                 paraHighlights.filter { it.noteText.isNotBlank() }.forEach { hl ->
@@ -502,6 +787,8 @@ fun ReaderScreen(
                             // Subtle modular footer + progress bar
                             val totalChapters = state.chapters.size.coerceAtLeast(1)
                             val overallPct = (((targetUnit + scrollFraction) / totalChapters.toFloat()) * 100f).coerceIn(0f, 100f)
+                            val currentBlockPos = (chapterStartOffsets.getOrElse(targetUnit) { 0 } +
+                                listState.firstVisibleItemIndex + 1).coerceIn(1, totalGlobalBlocks)
                             val chapterWords = remember(chapter.index, chapter.blocks.size) {
                                 chapter.blocks.sumOf { b ->
                                     if (b.text.isBlank()) 0 else b.text.trim().split(Regex("\\s+")).size
@@ -512,6 +799,7 @@ fun ReaderScreen(
                                 Column(
                                     modifier = Modifier
                                         .align(Alignment.BottomCenter)
+                                        .padding(bottom = prefs.bottomBarMarginDp.dp)
                                         .fillMaxWidth()
                                 ) {
                                     if (prefs.showReaderFooter) {
@@ -532,8 +820,16 @@ fun ReaderScreen(
                                             Spacer(Modifier.width(12.dp))
                                             val rightMeta = buildList {
                                                 if (prefs.showEtaInReader && chapterWords > 40) add("~${minsRemaining}m")
-                                                add("${overallPct.roundToInt()}%")
-                                                add("${targetUnit + 1}/${state.chapters.size}")
+                                                when (prefs.progressDisplayMode) {
+                                                    ProgressDisplayMode.PERCENT -> {
+                                                        add("${overallPct.roundToInt()}%")
+                                                        add("${targetUnit + 1}/${state.chapters.size}")
+                                                    }
+                                                    ProgressDisplayMode.POSITION_COUNT -> {
+                                                        add("Pos $currentBlockPos/$totalGlobalBlocks")
+                                                        add("Ch ${targetUnit + 1}/${state.chapters.size}")
+                                                    }
+                                                }
                                                 if (prefs.showClockInReader && clockText.isNotBlank()) add(clockText)
                                             }.joinToString(" • ")
                                             Text(
@@ -559,15 +855,30 @@ fun ReaderScreen(
                 }
             }
             is ReaderContentState.FixedPage -> {
+                val fixedInsetsModifier = when {
+                    prefs.cutoutMargin -> Modifier.windowInsetsPadding(WindowInsets.safeDrawing)
+                    prefs.fullscreenMode -> Modifier
+                    else -> Modifier.windowInsetsPadding(WindowInsets.navigationBars)
+                }
                 FixedPageCanvas(
                     primaryBitmap = pageBitmap,
                     secondaryBitmap = spreadBitmap,
                     isComic = state.isComic,
                     comicRtl = prefs.comicRtl,
-                    onTapCenter = { showOverlay = !showOverlay },
-                    onNext = { readerViewModel.nextUnit() },
-                    onPrevious = { readerViewModel.previousUnit() },
-                    modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)
+                    horizontalGestureMode = prefs.horizontalGestureMode,
+                    onTapCenter = {
+                        readerViewModel.recordUserReadingActivity()
+                        showOverlay = !showOverlay
+                    },
+                    onNext = {
+                        readerViewModel.recordUserReadingActivity()
+                        readerViewModel.nextUnit()
+                    },
+                    onPrevious = {
+                        readerViewModel.recordUserReadingActivity()
+                        readerViewModel.previousUnit()
+                    },
+                    modifier = Modifier.fillMaxSize().then(fixedInsetsModifier)
                 )
 
                 val pct = if (state.pageCount <= 1) 100f else ((currentUnit + 1) * 100f / state.pageCount)
@@ -576,12 +887,20 @@ fun ReaderScreen(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .navigationBarsPadding()
+                            .padding(bottom = prefs.bottomBarMarginDp.dp)
                             .fillMaxWidth()
                     ) {
                         if (prefs.showReaderFooter) {
                             val pageMeta = buildList {
-                                add("Page ${currentUnit + 1} of ${state.pageCount}")
-                                add("${pct.roundToInt()}%")
+                                when (prefs.progressDisplayMode) {
+                                    ProgressDisplayMode.PERCENT -> {
+                                        add("Page ${currentUnit + 1} of ${state.pageCount}")
+                                        add("${pct.roundToInt()}%")
+                                    }
+                                    ProgressDisplayMode.POSITION_COUNT -> {
+                                        add("Pos ${currentUnit + 1}/${state.pageCount}")
+                                    }
+                                }
                                 if (prefs.showClockInReader && clockText.isNotBlank()) add(clockText)
                             }.joinToString(" • ")
                             Text(
@@ -612,14 +931,16 @@ fun ReaderScreen(
                     .width(26.dp)
                     .fillMaxHeight(0.7f)
                     .pointerInput(Unit) {
-                        var currentB = if (prefs.screenBrightness < 0f) 0.5f else prefs.screenBrightness
+                        var currentB = prefs.screenBrightness.coerceIn(0.05f, 1f)
                         detectVerticalDragGestures(
                             onDragEnd = { brightnessToast = null },
                             onDragCancel = { brightnessToast = null }
                         ) { _, dragAmount ->
                             currentB = (currentB - dragAmount / 600f).coerceIn(0.05f, 1f)
                             brightnessToast = currentB
-                            readerViewModel.updatePreferences { it.copy(screenBrightness = currentB) }
+                            readerViewModel.updatePreferences {
+                                it.copy(customBrightnessEnabled = true, screenBrightness = currentB)
+                            }
                         }
                     }
             )
@@ -640,6 +961,21 @@ fun ReaderScreen(
                     Spacer(Modifier.width(8.dp))
                     Text("${(b * 100).roundToInt()}%", style = MaterialTheme.typography.titleMedium)
                 }
+            }
+        }
+
+        presetToast?.let { name ->
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+                tonalElevation = 4.dp,
+                modifier = Modifier.align(Alignment.Center)
+            ) {
+                Text(
+                    text = name,
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp)
+                )
             }
         }
 
@@ -687,10 +1023,41 @@ fun ReaderScreen(
             exit = fadeOut(),
             modifier = Modifier.align(Alignment.TopCenter)
         ) {
+            val topSwipeThresholdPx = with(density) { 48.dp.toPx() }
             Surface(
                 tonalElevation = 4.dp,
                 shadowElevation = 4.dp,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .pointerInput(prefs.quickColorPresetSwipe, prefs.colorPresets, prefs.activeColorPresetId) {
+                        if (!prefs.quickColorPresetSwipe) return@pointerInput
+                        var dragAccum = 0f
+                        detectHorizontalDragGestures(
+                            onDragStart = { dragAccum = 0f },
+                            onHorizontalDrag = { _, dragAmount -> dragAccum += dragAmount },
+                            onDragEnd = {
+                                if (abs(dragAccum) >= topSwipeThresholdPx) {
+                                    val list = prefs.colorPresets.ifEmpty { defaultReaderColorPresets() }
+                                    val curIdx = list.indexOfFirst { it.id == prefs.activeColorPresetId }.coerceAtLeast(0)
+                                    val nextIdx = if (dragAccum < 0f) {
+                                        (curIdx + 1) % list.size
+                                    } else {
+                                        (curIdx - 1 + list.size) % list.size
+                                    }
+                                    val nextPreset = list[nextIdx]
+                                    readerViewModel.updatePreferences {
+                                        it.copy(
+                                            themeMode = ReaderThemeMode.CUSTOM,
+                                            activeColorPresetId = nextPreset.id,
+                                            customBgHex = nextPreset.bgHex,
+                                            customInkHex = nextPreset.inkHex
+                                        )
+                                    }
+                                    presetToast = nextPreset.name
+                                }
+                            }
+                        )
+                    }
             ) {
                 Column(modifier = Modifier.statusBarsPadding().padding(horizontal = 8.dp, vertical = 6.dp)) {
                     Row(
@@ -699,6 +1066,7 @@ fun ReaderScreen(
                     ) {
                         IconButton(
                             onClick = {
+                                readerViewModel.setReaderForeground(false)
                                 readerViewModel.saveScrollProgress(scrollFraction)
                                 readerViewModel.ttsManager.stop()
                                 onBack()
@@ -918,7 +1286,6 @@ fun ReaderScreen(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ReflowableBlockView(
     text: String,
@@ -929,16 +1296,38 @@ private fun ReflowableBlockView(
     prefs: ReaderPreferences,
     fontFamily: FontFamily,
     inkColor: Color,
-    onLongPress: () -> Unit
+    onTapRoot: (Offset) -> Unit,
+    onLongPress: () -> Unit,
+    onDoubleTap: (() -> Unit)? = null
 ) {
     if (style == BlockStyle.DIVIDER) {
         HorizontalDivider(color = inkColor.copy(alpha = 0.22f), modifier = Modifier.padding(vertical = 8.dp))
         return
     }
 
-    val annotated = remember(text, runs, highlights, isTtsHighlighted) {
+    val baseWeightValue = prefs.readerFontWeight.weightValue
+    val baseWeight = remember(baseWeightValue) { FontWeight(baseWeightValue) }
+    val bionicBoldWeight = remember(baseWeightValue) {
+        FontWeight((baseWeightValue + 300).coerceIn(600, 900))
+    }
+    val headingWeight = remember(baseWeightValue) {
+        FontWeight((baseWeightValue + 250).coerceIn(600, 800))
+    }
+    val baseFontStyle = if (prefs.italicText) FontStyle.Italic else FontStyle.Normal
+    val useBionic = prefs.bionicReading && (style == BlockStyle.BODY || style == BlockStyle.BLOCKQUOTE)
+
+    val annotated = remember(text, runs, highlights, isTtsHighlighted, useBionic, bionicBoldWeight) {
         buildAnnotatedString {
             append(text)
+            if (useBionic) {
+                bionicWordRanges(text).forEach { range ->
+                    addStyle(
+                        SpanStyle(fontWeight = bionicBoldWeight),
+                        range.first,
+                        range.last + 1
+                    )
+                }
+            }
             runs.forEach { run ->
                 val s = run.start.coerceIn(0, text.length)
                 val e = run.end.coerceIn(s, text.length)
@@ -965,26 +1354,35 @@ private fun ReflowableBlockView(
     }
 
     val baseSize = prefs.fontSizeSp
+    val headingAlign = prefs.chapterTitleAlignment.toComposeTextAlign()
+    val bodyAlign = prefs.textAlignment.toComposeTextAlign()
+
     val textStyle = when (style) {
         BlockStyle.HEADING_1 -> TextStyle(
             fontFamily = fontFamily,
             fontSize = (baseSize * 1.45f).sp,
             lineHeight = (baseSize * 1.45f * 1.25f).sp,
-            fontWeight = FontWeight.Bold,
+            fontWeight = headingWeight,
+            fontStyle = baseFontStyle,
+            textAlign = headingAlign,
             color = inkColor
         )
         BlockStyle.HEADING_2 -> TextStyle(
             fontFamily = fontFamily,
             fontSize = (baseSize * 1.25f).sp,
             lineHeight = (baseSize * 1.25f * 1.3f).sp,
-            fontWeight = FontWeight.SemiBold,
+            fontWeight = headingWeight,
+            fontStyle = baseFontStyle,
+            textAlign = headingAlign,
             color = inkColor
         )
         BlockStyle.HEADING_3 -> TextStyle(
             fontFamily = fontFamily,
             fontSize = (baseSize * 1.1f).sp,
             lineHeight = (baseSize * 1.1f * 1.35f).sp,
-            fontWeight = FontWeight.SemiBold,
+            fontWeight = headingWeight,
+            fontStyle = baseFontStyle,
+            textAlign = headingAlign,
             color = inkColor
         )
         BlockStyle.CODE_BLOCK -> TextStyle(
@@ -997,7 +1395,10 @@ private fun ReflowableBlockView(
             fontFamily = fontFamily,
             fontSize = baseSize.sp,
             lineHeight = (baseSize * prefs.lineHeightMultiplier).sp,
+            letterSpacing = prefs.letterSpacingEm.em,
+            fontWeight = baseWeight,
             fontStyle = FontStyle.Italic,
+            textAlign = bodyAlign,
             color = inkColor.copy(alpha = 0.85f)
         )
         else -> TextStyle(
@@ -1005,10 +1406,12 @@ private fun ReflowableBlockView(
             fontSize = baseSize.sp,
             lineHeight = (baseSize * prefs.lineHeightMultiplier).sp,
             letterSpacing = prefs.letterSpacingEm.em,
+            fontWeight = baseWeight,
+            fontStyle = baseFontStyle,
             textIndent = if (prefs.firstLineIndentDp > 0.5f) TextIndent(firstLine = prefs.firstLineIndentDp.sp) else TextIndent.None,
             hyphens = if (prefs.autoHyphenation) Hyphens.Auto else Hyphens.None,
             color = inkColor,
-            textAlign = if (prefs.textJustified) TextAlign.Justify else TextAlign.Start
+            textAlign = bodyAlign
         )
     }
 
@@ -1024,13 +1427,32 @@ private fun ReflowableBlockView(
         else -> Modifier.fillMaxWidth()
     }
 
+    var blockRootPos by remember { mutableStateOf(Offset.Zero) }
     Box(
         modifier = containerModifier
             .clip(RoundedCornerShape(6.dp))
-            .combinedClickable(onClick = {}, onLongClick = onLongPress)
+            .onGloballyPositioned { blockRootPos = it.positionInRoot() }
+            .pointerInput(onLongPress, onDoubleTap, onTapRoot) {
+                detectTapGestures(
+                    onTap = { local -> onTapRoot(blockRootPos + local) },
+                    onLongPress = { onLongPress() },
+                    onDoubleTap = onDoubleTap?.let { fn -> { fn() } }
+                )
+            }
     ) {
-        Text(text = annotated, style = textStyle)
+        Text(
+            text = annotated,
+            style = textStyle,
+            modifier = Modifier.fillMaxWidth()
+        )
     }
+}
+
+private fun ReaderTextAlignment.toComposeTextAlign(): TextAlign = when (this) {
+    ReaderTextAlignment.START -> TextAlign.Start
+    ReaderTextAlignment.JUSTIFY -> TextAlign.Justify
+    ReaderTextAlignment.CENTER -> TextAlign.Center
+    ReaderTextAlignment.END -> TextAlign.End
 }
 
 @Composable
@@ -1039,6 +1461,7 @@ private fun FixedPageCanvas(
     secondaryBitmap: Bitmap?,
     isComic: Boolean,
     comicRtl: Boolean,
+    horizontalGestureMode: HorizontalGestureMode,
     onTapCenter: () -> Unit,
     onNext: () -> Unit,
     onPrevious: () -> Unit,
@@ -1047,6 +1470,7 @@ private fun FixedPageCanvas(
     var scale by remember(primaryBitmap) { mutableFloatStateOf(1f) }
     var offsetX by remember(primaryBitmap) { mutableFloatStateOf(0f) }
     var offsetY by remember(primaryBitmap) { mutableFloatStateOf(0f) }
+    val swipeThresholdPx = with(LocalDensity.current) { 72.dp.toPx() }
 
     Box(
         modifier = modifier
@@ -1069,16 +1493,47 @@ private fun FixedPageCanvas(
                     }
                 )
             }
-            .pointerInput(Unit) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    val nextScale = (scale * zoom).coerceIn(1f, 4f)
-                    scale = nextScale
-                    if (nextScale > 1f) {
-                        offsetX += pan.x
-                        offsetY += pan.y
-                    } else {
-                        offsetX = 0f; offsetY = 0f
+            .pointerInput(horizontalGestureMode, isComic, comicRtl, scale) {
+                if (horizontalGestureMode == HorizontalGestureMode.OFF || scale > 1.08f) return@pointerInput
+                var totalDrag = 0f
+                detectHorizontalDragGestures(
+                    onDragStart = { totalDrag = 0f },
+                    onHorizontalDrag = { _, dragAmount -> totalDrag += dragAmount },
+                    onDragEnd = {
+                        if (abs(totalDrag) >= swipeThresholdPx) {
+                            var goNext = when (horizontalGestureMode) {
+                                HorizontalGestureMode.NORMAL -> totalDrag < 0f
+                                HorizontalGestureMode.INVERTED -> totalDrag > 0f
+                                HorizontalGestureMode.OFF -> false
+                            }
+                            if (isComic && comicRtl) goNext = !goNext
+                            if (goNext) onNext() else onPrevious()
+                        }
                     }
+                )
+            }
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    do {
+                        val event = awaitPointerEvent()
+                        val multiTouch = event.changes.size >= 2
+                        if (multiTouch || scale > 1.05f) {
+                            val zoomChange = event.calculateZoom()
+                            val panChange = event.calculatePan()
+                            val nextScale = (scale * zoomChange).coerceIn(1f, 4f)
+                            scale = nextScale
+                            if (nextScale > 1f) {
+                                offsetX += panChange.x
+                                offsetY += panChange.y
+                            } else {
+                                offsetX = 0f; offsetY = 0f
+                            }
+                            if (multiTouch || zoomChange != 1f || scale > 1.05f) {
+                                event.changes.forEach { if (it.pressed) it.consume() }
+                            }
+                        }
+                    } while (event.changes.any { it.pressed })
                 }
             },
         contentAlignment = Alignment.Center
@@ -1144,6 +1599,13 @@ private fun resolveReaderFont(prefs: ReaderPreferences): FontFamily {
     return when (prefs.readerFont) {
         ReaderFont.LITERATA -> LiterataFontFamily
         ReaderFont.MERRIWEATHER -> MerriweatherFontFamily
+        ReaderFont.LORA -> LoraFontFamily
+        ReaderFont.EB_GARAMOND -> EbGaramondFontFamily
+        ReaderFont.ROBOTO_SERIF -> RobotoSerifFontFamily
+        ReaderFont.ROBOTO_SLAB -> RobotoSlabFontFamily
+        ReaderFont.OPEN_SANS -> OpenSansFontFamily
+        ReaderFont.NUNITO -> NunitoFontFamily
+        ReaderFont.LEXEND -> LexendFontFamily
         ReaderFont.PLUS_JAKARTA_SANS -> PlusJakartaFontFamily
         ReaderFont.JETBRAINS_MONO -> JetBrainsMonoFontFamily
         ReaderFont.SYSTEM_SERIF -> FontFamily.Serif

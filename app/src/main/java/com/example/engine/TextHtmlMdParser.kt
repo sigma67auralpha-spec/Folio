@@ -4,6 +4,41 @@ import java.nio.charset.Charset
 
 object TextHtmlMdParser {
 
+    private val PARA_SPLIT_REGEX = Regex("\n\\s*\n+")
+    private val LINE_JOIN_REGEX = Regex("[ \t]*\n[ \t]*")
+    private val ORDERED_LIST_REGEX = Regex("^\\d+\\.\\s+.*")
+    private val HTML_TITLE_REGEX = Regex("<title[^>]*>(.*?)</title>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+    private val HTML_AUTHOR_REGEX = Regex("<meta[^>]*name=[\"']author[\"'][^>]*content=[\"'](.*?)[\"']", RegexOption.IGNORE_CASE)
+    private val HTML_COMMENT_REGEX = Regex("<!--.*?-->", RegexOption.DOT_MATCHES_ALL)
+    private val HTML_SCRIPT_REGEX = Regex("<script\\b[^>]*>.*?</script>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+    private val HTML_STYLE_REGEX = Regex("<style\\b[^>]*>.*?</style>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+    private val HTML_HEAD_REGEX = Regex("<head\\b[^>]*>.*?</head>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+    private val BLOCK_BOUNDARY_TAGS = setOf(
+        "p", "h1", "h2", "h3", "h4", "h5", "h6",
+        "blockquote", "pre", "li", "dt", "dd", "tr", "figcaption",
+        "div", "section", "article", "aside", "header", "footer"
+    )
+    private val NAMED_ENTITIES = mapOf(
+        "nbsp" to " ",
+        "#160" to " ",
+        "amp" to "&",
+        "lt" to "<",
+        "gt" to ">",
+        "quot" to "\"",
+        "#39" to "'",
+        "apos" to "'",
+        "mdash" to "—",
+        "ndash" to "–",
+        "hellip" to "…",
+        "lsquo" to "‘",
+        "rsquo" to "’",
+        "ldquo" to "“",
+        "rdquo" to "”",
+        "laquo" to "«",
+        "raquo" to "»",
+        "copy" to "©"
+    )
+
     fun decodeBytes(bytes: ByteArray): String {
         return when {
             bytes.size >= 3 && bytes[0] == 0xEF.toByte() && bytes[1] == 0xBB.toByte() && bytes[2] == 0xBF.toByte() ->
@@ -21,8 +56,8 @@ object TextHtmlMdParser {
 
     fun parsePlainText(rawText: String, fallbackTitle: String): ParsedBookContent.Reflowable {
         val normalized = rawText.replace("\r\n", "\n").replace("\r", "\n")
-        val rawParagraphs = normalized.split(Regex("\n\\s*\n+"))
-            .map { it.trim().replace(Regex("[ \t]*\n[ \t]*"), " ") }
+        val rawParagraphs = normalized.split(PARA_SPLIT_REGEX)
+            .map { it.trim().replace(LINE_JOIN_REGEX, " ") }
             .filter { it.isNotEmpty() }
 
         val blocks = rawParagraphs.map { para ->
@@ -107,7 +142,7 @@ object TextHtmlMdParser {
                     val (clean, runs) = parseInlineMarkdown(trimmed.removePrefix("> ").trim())
                     blocks.add(ParagraphBlock(clean, BlockStyle.BLOCKQUOTE, runs))
                 }
-                trimmed.startsWith("- ") || trimmed.startsWith("* ") || trimmed.matches(Regex("^\\d+\\.\\s+.*")) -> {
+                trimmed.startsWith("- ") || trimmed.startsWith("* ") || trimmed.matches(ORDERED_LIST_REGEX) -> {
                     flushParagraph()
                     val itemText = when {
                         trimmed.startsWith("- ") -> "• ${trimmed.removePrefix("- ").trim()}"
@@ -137,10 +172,10 @@ object TextHtmlMdParser {
     }
 
     fun parseHtml(rawHtml: String, fallbackTitle: String): ParsedBookContent.Reflowable {
-        val titleMatch = Regex("<title[^>]*>(.*?)</title>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+        val titleMatch = HTML_TITLE_REGEX
             .find(rawHtml)?.groupValues?.getOrNull(1)?.let { decodeHtmlEntities(it).trim() }
             ?.takeIf { it.isNotBlank() }
-        val authorMatch = Regex("<meta[^>]*name=[\"']author[\"'][^>]*content=[\"'](.*?)[\"']", RegexOption.IGNORE_CASE)
+        val authorMatch = HTML_AUTHOR_REGEX
             .find(rawHtml)?.groupValues?.getOrNull(1)?.let { decodeHtmlEntities(it).trim() }
             ?.takeIf { it.isNotBlank() }
 
@@ -166,10 +201,10 @@ object TextHtmlMdParser {
         imageResolver: ((String) -> String?)? = null
     ): List<ParagraphBlock> {
         val cleaned = html
-            .replace(Regex("<!--.*?-->", RegexOption.DOT_MATCHES_ALL), "")
-            .replace(Regex("<script\\b[^>]*>.*?</script>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)), "")
-            .replace(Regex("<style\\b[^>]*>.*?</style>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)), "")
-            .replace(Regex("<head\\b[^>]*>.*?</head>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)), "")
+            .let { if ("<!--" in it) it.replace(HTML_COMMENT_REGEX, "") else it }
+            .let { if ("<script" in it || "<SCRIPT" in it) it.replace(HTML_SCRIPT_REGEX, "") else it }
+            .let { if ("<style" in it || "<STYLE" in it) it.replace(HTML_STYLE_REGEX, "") else it }
+            .let { if ("<head" in it || "<HEAD" in it) it.replace(HTML_HEAD_REGEX, "") else it }
 
         val blocks = mutableListOf<ParagraphBlock>()
         val currentText = StringBuilder()
@@ -258,11 +293,7 @@ object TextHtmlMdParser {
             }
         }
 
-        val blockBoundaryTags = setOf(
-            "p", "h1", "h2", "h3", "h4", "h5", "h6",
-            "blockquote", "pre", "li", "dt", "dd", "tr", "figcaption",
-            "div", "section", "article", "aside", "header", "footer"
-        )
+        val blockBoundaryTags = BLOCK_BOUNDARY_TAGS
 
         var i = 0
         while (i < cleaned.length) {
@@ -379,41 +410,64 @@ object TextHtmlMdParser {
     }
 
     private fun extractAttr(tagBody: String, attrName: String): String? {
-        val pattern = Regex("""\b${Regex.escape(attrName)}\s*=\s*(?:"([^"]*)"|'([^']*)')""", RegexOption.IGNORE_CASE)
-        val match = pattern.find(tagBody) ?: return null
-        return match.groupValues[1].ifEmpty { match.groupValues[2] }.takeIf { it.isNotBlank() }
+        var searchFrom = 0
+        while (searchFrom < tagBody.length) {
+            val idx = tagBody.indexOf(attrName, searchFrom, ignoreCase = true)
+            if (idx < 0) return null
+            val beforeOk = idx == 0 || tagBody[idx - 1].isWhitespace()
+            var pos = idx + attrName.length
+            while (pos < tagBody.length && tagBody[pos].isWhitespace()) pos++
+            if (beforeOk && pos < tagBody.length && tagBody[pos] == '=') {
+                pos++
+                while (pos < tagBody.length && tagBody[pos].isWhitespace()) pos++
+                if (pos >= tagBody.length) return null
+                val quote = tagBody[pos]
+                if (quote == '"' || quote == '\'') {
+                    val end = tagBody.indexOf(quote, pos + 1)
+                    if (end > pos + 1) return tagBody.substring(pos + 1, end).takeIf { it.isNotBlank() }
+                    return null
+                }
+            }
+            searchFrom = idx + attrName.length
+        }
+        return null
     }
 
     fun decodeHtmlEntities(input: String): String {
-        return input
-            .replace("&nbsp;", " ")
-            .replace("&#160;", " ")
-            .replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-            .replace("&apos;", "'")
-            .replace("&mdash;", "—")
-            .replace("&ndash;", "–")
-            .replace("&hellip;", "…")
-            .replace("&lsquo;", "‘")
-            .replace("&rsquo;", "’")
-            .replace("&ldquo;", "“")
-            .replace("&rdquo;", "”")
-            .replace("&laquo;", "«")
-            .replace("&raquo;", "»")
-            .replace("&copy;", "©")
-            .replace(Regex("&#(\\d+);")) { m ->
-                m.groupValues[1].toIntOrNull()?.let { code ->
-                    runCatching { String(Character.toChars(code)) }.getOrNull()
-                } ?: m.value
+        if ('&' !in input) return input
+        val sb = StringBuilder(input.length)
+        var i = 0
+        while (i < input.length) {
+            val amp = input.indexOf('&', i)
+            if (amp < 0) {
+                sb.append(input, i, input.length)
+                break
             }
-            .replace(Regex("&#x([0-9a-fA-F]+);")) { m ->
-                m.groupValues[1].toIntOrNull(16)?.let { code ->
-                    runCatching { String(Character.toChars(code)) }.getOrNull()
-                } ?: m.value
+            if (amp > i) sb.append(input, i, amp)
+            val semi = input.indexOf(';', amp + 1)
+            if (semi in (amp + 2)..(amp + 12)) {
+                val entity = input.substring(amp + 1, semi)
+                val replacement = NAMED_ENTITIES[entity] ?: NAMED_ENTITIES[entity.lowercase()] ?: when {
+                    entity.startsWith("#x", ignoreCase = true) ->
+                        entity.substring(2).toIntOrNull(16)?.let { code ->
+                            runCatching { String(Character.toChars(code)) }.getOrNull()
+                        }
+                    entity.startsWith("#") ->
+                        entity.substring(1).toIntOrNull()?.let { code ->
+                            runCatching { String(Character.toChars(code)) }.getOrNull()
+                        }
+                    else -> null
+                }
+                if (replacement != null) {
+                    sb.append(replacement)
+                    i = semi + 1
+                    continue
+                }
             }
+            sb.append('&')
+            i = amp + 1
+        }
+        return sb.toString()
     }
 
     fun parseInlineMarkdown(input: String): Pair<String, List<TextRun>> {

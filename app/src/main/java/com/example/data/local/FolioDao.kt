@@ -38,6 +38,9 @@ interface FolioDao {
     @Query("SELECT * FROM books")
     suspend fun getAllBooksSnapshot(): List<BookEntity>
 
+    @Query("SELECT * FROM books ORDER BY CASE WHEN readStatus != 'FINISHED' AND lastOpenedAt IS NOT NULL THEN 0 WHEN lastOpenedAt IS NOT NULL THEN 1 ELSE 2 END, COALESCE(lastOpenedAt, addedAt) DESC LIMIT 1")
+    suspend fun getLatestBookForWidget(): BookEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertBook(book: BookEntity): Long
 
@@ -145,6 +148,12 @@ interface FolioDao {
 
     @Query("UPDATE reading_sessions SET durationSeconds = durationSeconds + :deltaSeconds WHERE id = :sessionId")
     suspend fun incrementSession(sessionId: Long, deltaSeconds: Long)
+
+    @Query("DELETE FROM reading_sessions")
+    suspend fun clearAllReadingSessions()
+
+    @Query("UPDATE books SET totalReadingSeconds = 0")
+    suspend fun resetAllBookReadingSeconds()
 
     // Watched folders
     @Query("SELECT * FROM watched_folders ORDER BY addedAt DESC")

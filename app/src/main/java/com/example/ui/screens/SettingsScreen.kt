@@ -30,6 +30,7 @@ import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.RestartAlt
 import androidx.compose.material.icons.outlined.Restore
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -40,7 +41,12 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -66,10 +72,12 @@ fun SettingsScreen(
     onRemoveFolder: (WatchedFolderEntity) -> Unit,
     onExportBackup: () -> Unit,
     onRestoreBackup: () -> Unit,
+    onResetStats: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val prefs = state.preferences
     val isDark = prefs.appDarkTheme ?: isSystemInDarkTheme()
+    var showResetStatsConfirm by remember { mutableStateOf(false) }
 
     LazyColumn(
         modifier = modifier.fillMaxSize(),
@@ -311,7 +319,8 @@ fun SettingsScreen(
                 }
                 Spacer(Modifier.height(8.dp))
                 Text("Reader Orientation Lock", style = MaterialTheme.typography.labelLarge)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+                androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OrientationLock.entries.forEach { lock ->
                         FilterChip(
                             selected = prefs.orientationLock == lock,
@@ -401,6 +410,17 @@ fun SettingsScreen(
 
         item {
             OutlinedButton(
+                onClick = { showResetStatsConfirm = true },
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("reset_stats_button")
+            ) {
+                Icon(Icons.Outlined.DeleteOutline, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Reset Reading Time & Streak Stats")
+            }
+        }
+
+        item {
+            OutlinedButton(
                 onClick = {
                     onUpdatePrefs { current ->
                         ReaderPreferences(
@@ -416,6 +436,31 @@ fun SettingsScreen(
                 Text("Reset Customization & Toggles to Defaults")
             }
         }
+    }
+
+    if (showResetStatsConfirm) {
+        AlertDialog(
+            onDismissRequest = { showResetStatsConfirm = false },
+            title = { Text("Reset Reading Stats?") },
+            text = {
+                Text("This clears your reading time, daily sessions, and streak heatmap. Your books, progress, shelves, and highlights stay untouched.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showResetStatsConfirm = false
+                        onResetStats()
+                    }
+                ) {
+                    Text("Reset")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResetStatsConfirm = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 

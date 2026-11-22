@@ -200,4 +200,133 @@ class ExampleUnitTest {
         assertEquals("secret", EpubParser.normalizePath("../../secret"))
         assertEquals("OEBPS/Text/Chapter 1.xhtml", EpubParser.normalizePath("OEBPS/Sub/../Text/Chapter%201.xhtml#frag"))
     }
+
+    @Test
+    fun elapsedSecondsCalculationClampsAndIgnoresInvalidDeltas() {
+        assertEquals(0L, com.example.ui.viewmodel.computeElapsedSecondsToFlush(5_000L, 4_000L))
+        assertEquals(0L, com.example.ui.viewmodel.computeElapsedSecondsToFlush(5_000L, 5_999L))
+        assertEquals(5L, com.example.ui.viewmodel.computeElapsedSecondsToFlush(1_000L, 6_400L))
+        assertEquals(15L, com.example.ui.viewmodel.computeElapsedSecondsToFlush(0L, 600_000L))
+    }
+
+    @Test
+    fun bookCacheBinaryRoundTripPreservesChaptersAndInlineRuns() {
+        val cacheDir = kotlin.io.path.createTempDirectory("folio_cache_test").toFile()
+        cacheDir.deleteOnExit()
+        val cacheFile = File(cacheDir, "sample_v1.bin")
+        val original = ParsedBookContent.Reflowable(
+            metadata = com.example.engine.ParsedMetadata(
+                title = "Dune",
+                author = "Frank Herbert",
+                series = "Dune Chronicles",
+                seriesIndex = 1f,
+                description = "A desert planet epic.",
+                totalUnits = 2
+            ),
+            chapters = listOf(
+                com.example.engine.BookChapter(
+                    index = 0,
+                    title = "Book One",
+                    blocks = listOf(
+                        com.example.engine.ParagraphBlock("Book One", BlockStyle.HEADING_1),
+                        com.example.engine.ParagraphBlock(
+                            text = "Fear is the mind-killer.",
+                            style = BlockStyle.BODY,
+                            runs = listOf(com.example.engine.TextRun(0, 4, bold = true, italic = false, code = false))
+                        )
+                    )
+                )
+            )
+        )
+        com.example.engine.BookCache.writeToDisk(cacheFile, original)
+        assertTrue(cacheFile.exists())
+        val restored = com.example.engine.BookCache.readFromDisk(cacheFile)
+        assertEquals(original.metadata.title, restored?.metadata?.title)
+        assertEquals(original.metadata.author, restored?.metadata?.author)
+        assertEquals(original.chapters.size, restored?.chapters?.size)
+        assertEquals(original.chapters[0].blocks[1].text, restored?.chapters?.get(0)?.blocks?.get(1)?.text)
+        assertEquals(original.chapters[0].blocks[1].runs, restored?.chapters?.get(0)?.blocks?.get(1)?.runs)
+    }
+
+    @Test
+    fun decodeHtmlEntitiesHandlesPlainNamedAndNumericEntities() {
+        assertEquals("Plain ASCII text", TextHtmlMdParser.decodeHtmlEntities("Plain ASCII text"))
+        assertEquals("Tom & Jerry — \"Hi\" © 2026 A!", TextHtmlMdParser.decodeHtmlEntities("Tom &amp; Jerry &mdash; &quot;Hi&quot; &#169; 2026 &#x41;!"))
+    }
+
+    @Test
+    fun epubParseMetadataOnlyExtractsTitleAuthorAndSpineCount() {
+        val tmp = File.createTempFile("meta_only", ".epub")
+        tmp.deleteOnExit()
+        ZipOutputStream(tmp.outputStream()).use { zos ->
+            fun add(name: String, content: String) {
+                zos.putNextEntry(ZipEntry(name))
+                zos.write(content.toByteArray(Charsets.UTF_8))
+                zos.closeEntry()
+            }
+            add("META-INF/container.xml", """<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>""")
+            add(
+                "content.opf",
+                """<?xml version="1.0"?>
+                <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+                  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+                    <dc:title>Speed Reader</dc:title>
+                    <dc:creator>Grace Hopper</dc:creator>
+                  </metadata>
+                  <manifest>
+                    <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+                    <item id="c2" href="c2.xhtml" media-type="application/xhtml+xml"/>
+                  </manifest>
+                  <spine>
+                    <itemref idref="c1"/>
+                    <itemref idref="c2"/>
+                  </spine>
+                </package>""".trimIndent()
+            )
+            add("c1.xhtml", "<html><body><p>Ch 1</p></body></html>")
+            add("c2.xhtml", "<html><body><p>Ch 2</p></body></html>")
+        }
+        val meta = EpubParser.parseMetadataOnly(tmp, "Fallback")
+        assertEquals("Speed Reader", meta.title)
+        assertEquals("Grace Hopper", meta.author)
+        assertEquals(2, meta.totalUnits)
+    }
+
+    @Test
+    fun widgetSummaryComputesStreaksTodayAndTotalTime() {
+        val today = 20_800L
+        val sessions = listOf(
+            com.example.data.model.ReadingSessionEntity(id = 1, bookId = 1, epochDay = today - 2, durationSeconds = 400L),
+            com.example.data.model.ReadingSessionEntity(id = 2, bookId = 1, epochDay = today - 1, durationSeconds = 600L),
+            com.example.data.model.ReadingSessionEntity(id = 3, bookId = 2, epochDay = today, durationSeconds = 900L)
+        )
+        val books = listOf(
+            com.example.data.model.BookEntity(id = 1, title = "Book A", format = BookFormat.EPUB, fileUri = "file:///a", fileHash = "h1"),
+            com.example.data.model.BookEntity(id = 2, title = "Book B", format = BookFormat.PDF, fileUri = "file:///b", fileHash = "h2")
+        )
+        val summary = com.example.widget.FolioWidgetUpdater.computeWidgetSummary(sessions, books, today)
+        assertEquals(3, summary.currentStreak)
+        assertEquals(3, summary.bestStreak)
+        assertEquals(900L, summary.todaySeconds)
+        assertEquals(1900L, summary.totalSeconds)
+        assertEquals(2, summary.bookCount)
+    }
+
+    @Test
+    fun bionicWordRangesEmphasizesOpeningLettersAcrossScripts() {
+        val sample = "Darrow kämpft, reading a book in 123!"
+        val ranges = com.example.ui.screens.bionicWordRanges(sample)
+        val emphasized = ranges.map { sample.substring(it) }
+        assertEquals(listOf("Da", "kä", "rea", "a", "bo", "i", "1"), emphasized)
+    }
+
+    @Test
+    fun readerPreferencesIncludesDefaultColorPresetsAndAlignmentCompat() {
+        val prefs = com.example.data.model.ReaderPreferences()
+        assertEquals(5, prefs.colorPresets.size)
+        assertEquals("paper", prefs.activeColorPresetId)
+        assertFalse(prefs.textJustified)
+        val justified = prefs.copy(textAlignment = com.example.data.model.ReaderTextAlignment.JUSTIFY)
+        assertTrue(justified.textJustified)
+    }
 }

@@ -3,6 +3,8 @@ package com.example.ui.viewmodel
 import android.app.Application
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.SystemClock
+import android.util.LruCache
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.local.FolioDatabase
@@ -15,6 +17,7 @@ import com.example.data.model.FormatCategory
 import com.example.data.model.HighlightColor
 import com.example.data.model.HighlightEntity
 import com.example.data.model.ReaderPreferences
+import com.example.engine.BookCache
 import com.example.engine.BookChapter
 import com.example.engine.BookParser
 import com.example.engine.ComicArchiveHelper
@@ -22,19 +25,29 @@ import com.example.engine.ParsedBookContent
 import com.example.engine.PdfPageHelper
 import com.example.engine.TtsManager
 import com.example.engine.TtsState
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+
+internal fun computeElapsedSecondsToFlush(
+    anchorMs: Long,
+    nowMs: Long,
+    maxChunkSeconds: Long = 15L
+): Long {
+    if (nowMs <= anchorMs) return 0L
+    return ((nowMs - anchorMs) / 1000L).coerceIn(0L, maxChunkSeconds)
+}
 
 data class SearchMatch(
     val chapterIndex: Int,
@@ -96,14 +109,28 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
     val ttsState: StateFlow<TtsState> = ttsManager.state
 
     private var activeBookFile: File? = null
+    private var activeTrackedBookId: Long? = null
+    private var isReaderForegroundActive: Boolean = false
+    private var sessionAnchorElapsedMs: Long? = null
+    private var lastActivityElapsedMs: Long = 0L
     private var sessionTimerJob: Job? = null
     private var collectorJobs = mutableListOf<Job>()
+    private var prefetchJob: Job? = null
     private var lastLoadedPdfOptions: Triple<Int, Boolean, Boolean>? = null
+    private val pageBitmapCache = object : LruCache<String, Bitmap>(6) {}
 
     fun loadBook(bookId: Long) {
+        flushReadingSession()
         collectorJobs.forEach { it.cancel() }
         collectorJobs.clear()
+        prefetchJob?.cancel()
+        prefetchJob = null
+        pageBitmapCache.evictAll()
+        lastLoadedPdfOptions = null
         sessionTimerJob?.cancel()
+        sessionTimerJob = null
+        activeTrackedBookId = null
+        sessionAnchorElapsedMs = null
 
         viewModelScope.launch {
             _contentState.value = ReaderContentState.Loading
@@ -132,8 +159,20 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
             withContext(Dispatchers.IO) {
                 when (loaded.format.category) {
                     FormatCategory.REFLOWABLE -> {
-                        val imgCache = File(getApplication<Application>().cacheDir, "epub_images/${loaded.fileHash.take(16)}")
-                        when (val parsed = BookParser.parseReflowableContent(file, loaded.format, loaded.title, imgCache)) {
+                        val cacheDir = getApplication<Application>().cacheDir
+                        val imgCache = File(cacheDir, "epub_images/${loaded.fileHash.take(16)}")
+                        val cacheKey = "${loaded.fileHash}_${loaded.format.name}"
+                        val diskCacheFile = File(cacheDir, "parsed_books/${loaded.fileHash.take(16)}_v1.bin")
+                        when (
+                            val parsed = BookParser.parseReflowableContent(
+                                file = file,
+                                format = loaded.format,
+                                fallbackTitle = loaded.title,
+                                imageCacheDir = imgCache,
+                                cacheKey = cacheKey,
+                                diskCacheFile = diskCacheFile
+                            )
+                        ) {
                             is ParsedBookContent.Reflowable -> {
                                 val safeUnit = loaded.currentUnit.coerceIn(0, (parsed.chapters.size - 1).coerceAtLeast(0))
                                 _currentUnit.value = safeUnit
@@ -154,11 +193,9 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                     }
                     FormatCategory.COMIC -> {
                         val count = if (loaded.format == BookFormat.CBZ) {
-                            runCatching {
-                                java.util.zip.ZipFile(file).use { ComicArchiveHelper.listCbzImageNames(it).size }
-                            }.getOrDefault(0)
+                            ComicArchiveHelper.getCbzPageCount(file)
                         } else {
-                            ComicArchiveHelper.listRarStoredImages(file).size
+                            ComicArchiveHelper.listRarStoredHeaders(file).size
                         }
                         if (count <= 0) {
                             _contentState.value = ReaderContentState.Error(
@@ -178,20 +215,118 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
 
-            startReadingSessionTracker(loaded.id)
+            activeTrackedBookId = loaded.id
+            if (isReaderForegroundActive) {
+                val now = SystemClock.elapsedRealtime()
+                sessionAnchorElapsedMs = now
+                lastActivityElapsedMs = now
+                ensureSessionTimerRunning()
+            }
         }
     }
 
-    private fun startReadingSessionTracker(bookId: Long) {
-        sessionTimerJob?.cancel()
+    fun setReaderForeground(active: Boolean) {
+        if (active) {
+            if (!isReaderForegroundActive) {
+                isReaderForegroundActive = true
+                val now = SystemClock.elapsedRealtime()
+                lastActivityElapsedMs = now
+                if (activeTrackedBookId != null) {
+                    sessionAnchorElapsedMs = now
+                    ensureSessionTimerRunning()
+                }
+            }
+        } else {
+            flushReadingSession()
+            isReaderForegroundActive = false
+            sessionAnchorElapsedMs = null
+            sessionTimerJob?.cancel()
+            sessionTimerJob = null
+        }
+    }
+
+    fun recordUserReadingActivity() {
+        val now = SystemClock.elapsedRealtime()
+        lastActivityElapsedMs = now
+        if (isReaderForegroundActive && activeTrackedBookId != null && sessionAnchorElapsedMs == null) {
+            sessionAnchorElapsedMs = now
+            ensureSessionTimerRunning()
+        }
+    }
+
+    private fun ensureSessionTimerRunning() {
+        if (sessionTimerJob?.isActive == true) return
         sessionTimerJob = viewModelScope.launch {
-            delay(2_000L)
-            repository.recordReadingTime(bookId, 2L)
-            while (isActive) {
-                delay(15_000L)
-                repository.recordReadingTime(bookId, 15L)
+            while (isActive && isReaderForegroundActive) {
+                delay(5_000L)
+                val bookId = activeTrackedBookId ?: break
+                if (!isReaderForegroundActive) break
+                val now = SystemClock.elapsedRealtime()
+                val anchor = sessionAnchorElapsedMs ?: continue
+                val ttsActive = ttsState.value.isSpeaking
+                if (!ttsActive && now - lastActivityElapsedMs > IDLE_TIMEOUT_MS) {
+                    sessionAnchorElapsedMs = null
+                } else {
+                    val elapsedSec = computeElapsedSecondsToFlush(anchor, now, maxChunkSeconds = 15L)
+                    if (elapsedSec > 0L) {
+                        sessionAnchorElapsedMs = anchor + elapsedSec * 1000L
+                        repository.recordReadingTime(bookId, elapsedSec)
+                    }
+                }
             }
         }
+    }
+
+    private fun flushReadingSession(useDetachedScope: Boolean = false) {
+        val bookId = activeTrackedBookId ?: return
+        val anchor = sessionAnchorElapsedMs ?: return
+        sessionAnchorElapsedMs = null
+        val elapsedSec = computeElapsedSecondsToFlush(anchor, SystemClock.elapsedRealtime(), maxChunkSeconds = 15L)
+        val scope = if (useDetachedScope) CoroutineScope(Dispatchers.IO) else viewModelScope
+        scope.launch(NonCancellable) {
+            repository.recordReadingTime(bookId, elapsedSec, forceWidgetUpdate = true)
+        }
+    }
+
+    companion object {
+        private const val IDLE_TIMEOUT_MS = 3 * 60_000L
+    }
+
+    private fun loadOrRenderFixedBitmap(
+        bookId: Long,
+        file: File,
+        format: BookFormat,
+        isComic: Boolean,
+        pageIndex: Int,
+        cropMargins: Boolean,
+        darkInvert: Boolean,
+        forceRefresh: Boolean = false
+    ): Bitmap? {
+        val key = if (isComic) {
+            "${bookId}_comic_$pageIndex"
+        } else {
+            "${bookId}_pdf_${pageIndex}_${cropMargins}_$darkInvert"
+        }
+        if (!forceRefresh) {
+            pageBitmapCache.get(key)?.let { return it }
+        }
+        val rendered = if (!isComic) {
+            PdfPageHelper.renderPage(
+                file = file,
+                pageIndex = pageIndex,
+                targetWidth = 1280,
+                cropMargins = cropMargins,
+                darkInvert = darkInvert
+            )
+        } else if (format == BookFormat.CBZ) {
+            ComicArchiveHelper.loadCbzPageBitmap(file, pageIndex)
+        } else {
+            ComicArchiveHelper.loadCbrPageBitmap(file, pageIndex)
+        }
+        if (rendered != null) {
+            pageBitmapCache.put(key, rendered)
+        }
+        return rendered
     }
 
     fun renderFixedPage(pageIndex: Int, forceRefresh: Boolean = false) {
@@ -208,33 +343,69 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
             lastLoadedPdfOptions = key
         }
 
+        prefetchJob?.cancel()
         viewModelScope.launch(Dispatchers.IO) {
             if (!state.isComic) {
-                val bmp = PdfPageHelper.renderPage(
+                val bmp = loadOrRenderFixedBitmap(
+                    bookId = currentBook.id,
                     file = file,
+                    format = currentBook.format,
+                    isComic = false,
                     pageIndex = safePage,
-                    targetWidth = 1280,
                     cropMargins = prefs.pdfMarginCrop,
-                    darkInvert = prefs.pdfDarkInvert
+                    darkInvert = prefs.pdfDarkInvert,
+                    forceRefresh = forceRefresh
                 )
                 _currentPageBitmap.value = bmp
                 _secondarySpreadBitmap.value = null
             } else {
-                val loader: (Int) -> Bitmap? = { idx ->
-                    if (currentBook.format == BookFormat.CBZ) {
-                        ComicArchiveHelper.loadCbzPageBitmap(file, idx)
-                    } else {
-                        ComicArchiveHelper.loadCbrPageBitmap(file, idx)
-                    }
-                }
-                val primary = loader(safePage)
+                val primary = loadOrRenderFixedBitmap(
+                    bookId = currentBook.id,
+                    file = file,
+                    format = currentBook.format,
+                    isComic = true,
+                    pageIndex = safePage,
+                    cropMargins = false,
+                    darkInvert = false,
+                    forceRefresh = forceRefresh
+                )
                 val secondary = if (prefs.comicDoubleSpread && safePage + 1 < state.pageCount) {
-                    loader(safePage + 1)
+                    loadOrRenderFixedBitmap(
+                        bookId = currentBook.id,
+                        file = file,
+                        format = currentBook.format,
+                        isComic = true,
+                        pageIndex = safePage + 1,
+                        cropMargins = false,
+                        darkInvert = false,
+                        forceRefresh = forceRefresh
+                    )
                 } else null
                 _currentPageBitmap.value = primary
                 _secondarySpreadBitmap.value = secondary
             }
             repository.saveProgress(currentBook.id, safePage, state.pageCount, if (safePage == state.pageCount - 1) 1f else 0f)
+
+            // Prefetch adjacent pages in background so next/previous turns are instantaneous
+            prefetchJob = viewModelScope.launch(Dispatchers.IO) {
+                val targets = buildList {
+                    if (safePage + 1 < state.pageCount) add(safePage + 1)
+                    if (state.isComic && prefs.comicDoubleSpread && safePage + 2 < state.pageCount) add(safePage + 2)
+                    if (safePage - 1 >= 0) add(safePage - 1)
+                }
+                for (target in targets) {
+                    if (!isActive) break
+                    loadOrRenderFixedBitmap(
+                        bookId = currentBook.id,
+                        file = file,
+                        format = currentBook.format,
+                        isComic = state.isComic,
+                        pageIndex = target,
+                        cropMargins = prefs.pdfMarginCrop,
+                        darkInvert = prefs.pdfDarkInvert
+                    )
+                }
+            }
         }
     }
 
@@ -407,8 +578,12 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     override fun onCleared() {
-        super.onCleared()
+        flushReadingSession(useDetachedScope = true)
+        isReaderForegroundActive = false
         sessionTimerJob?.cancel()
+        prefetchJob?.cancel()
+        pageBitmapCache.evictAll()
         ttsManager.release()
+        super.onCleared()
     }
 }

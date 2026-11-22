@@ -58,8 +58,7 @@ object PdfPageHelper {
     private fun cropWhiteMargins(source: Bitmap): Bitmap {
         val w = source.width
         val h = source.height
-        val pixels = IntArray(w * h)
-        source.getPixels(pixels, 0, w, 0, 0, w, h)
+        val rowPixels = IntArray(w)
 
         var minX = w
         var maxX = -1
@@ -69,9 +68,10 @@ object PdfPageHelper {
 
         var y = 0
         while (y < h) {
+            source.getPixels(rowPixels, 0, w, 0, y, w, 1)
             var x = 0
             while (x < w) {
-                val c = pixels[y * w + x]
+                val c = rowPixels[x]
                 val r = (c shr 16) and 0xFF
                 val g = (c shr 8) and 0xFF
                 val b = c and 0xFF
