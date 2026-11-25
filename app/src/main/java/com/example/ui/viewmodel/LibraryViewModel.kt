@@ -192,6 +192,19 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    fun openExternalBookUri(uri: Uri, onBookReady: (Long) -> Unit) {
+        viewModelScope.launch {
+            _isImporting.value = true
+            val res = repository.importOrFindBookUri(uri)
+            _isImporting.value = false
+            res.onSuccess { bookId ->
+                onBookReady(bookId)
+            }.onFailure { err ->
+                _statusMessage.value = err.message ?: "Unable to open this file in Folio."
+            }
+        }
+    }
+
     fun linkFolder(treeUri: Uri) {
         viewModelScope.launch {
             _isImporting.value = true
@@ -222,6 +235,12 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
                         LibraryViewMode.LIST else LibraryViewMode.GRID
                 )
             }
+        }
+    }
+
+    fun toggleGroupSeries() {
+        viewModelScope.launch {
+            prefsRepository.update { it.copy(groupSeriesInLibrary = !it.groupSeriesInLibrary) }
         }
     }
 

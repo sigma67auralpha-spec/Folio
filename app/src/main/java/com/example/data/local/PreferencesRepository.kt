@@ -23,6 +23,7 @@ import com.example.data.model.ReaderColorPreset
 import com.example.data.model.ReaderFont
 import com.example.data.model.ReaderFontWeight
 import com.example.data.model.ReaderPreferences
+import com.example.data.model.ReaderReadingMode
 import com.example.data.model.ReaderTextAlignment
 import com.example.data.model.ReaderThemeMode
 import com.example.data.model.TapZonePreset
@@ -72,6 +73,7 @@ class PreferencesRepository(private val context: Context) {
         val IMAGE_WIDTH_PERCENT = floatPreferencesKey("image_width_percent")
         val WARMTH_TINT = floatPreferencesKey("warmth_tint")
         val TAP_ZONE = stringPreferencesKey("tap_zone")
+        val READING_MODE = stringPreferencesKey("reading_mode")
         val HORIZONTAL_GESTURE_MODE = stringPreferencesKey("horizontal_gesture_mode")
         val VOLUME_PAGING = booleanPreferencesKey("volume_paging")
         val SWIPE_BRIGHTNESS = booleanPreferencesKey("swipe_brightness")
@@ -96,6 +98,7 @@ class PreferencesRepository(private val context: Context) {
         val APP_DARK_THEME = stringPreferencesKey("app_dark_theme")
         val APP_ACCENT = stringPreferencesKey("app_accent")
         val LIBRARY_DENSITY = stringPreferencesKey("library_density")
+        val GROUP_SERIES_IN_LIBRARY = booleanPreferencesKey("group_series_in_library")
         val COMIC_RTL = booleanPreferencesKey("comic_rtl")
         val COMIC_DOUBLE_SPREAD = booleanPreferencesKey("comic_double_spread")
         val PDF_MARGIN_CROP = booleanPreferencesKey("pdf_margin_crop")
@@ -161,6 +164,8 @@ class PreferencesRepository(private val context: Context) {
             warmthTint = prefs[Keys.WARMTH_TINT] ?: 0f,
             tapZonePreset = prefs[Keys.TAP_ZONE]?.let { runCatching { TapZonePreset.valueOf(it) }.getOrNull() }
                 ?: TapZonePreset.CLASSIC_LR,
+            readingMode = prefs[Keys.READING_MODE]?.let { runCatching { ReaderReadingMode.valueOf(it) }.getOrNull() }
+                ?: ReaderReadingMode.SCROLL,
             horizontalGestureMode = prefs[Keys.HORIZONTAL_GESTURE_MODE]?.let {
                 runCatching { HorizontalGestureMode.valueOf(it) }.getOrNull()
             } ?: HorizontalGestureMode.NORMAL,
@@ -199,6 +204,7 @@ class PreferencesRepository(private val context: Context) {
                 ?: AppAccent.TERRACOTTA,
             libraryDensity = prefs[Keys.LIBRARY_DENSITY]?.let { runCatching { LibraryDensity.valueOf(it) }.getOrNull() }
                 ?: LibraryDensity.COMFORTABLE,
+            groupSeriesInLibrary = prefs[Keys.GROUP_SERIES_IN_LIBRARY] ?: true,
             comicRtl = prefs[Keys.COMIC_RTL] ?: false,
             comicDoubleSpread = prefs[Keys.COMIC_DOUBLE_SPREAD] ?: false,
             pdfMarginCrop = prefs[Keys.PDF_MARGIN_CROP] ?: false,
@@ -253,6 +259,7 @@ class PreferencesRepository(private val context: Context) {
             prefs[Keys.IMAGE_WIDTH_PERCENT] = next.imageWidthPercent
             prefs[Keys.WARMTH_TINT] = next.warmthTint
             prefs[Keys.TAP_ZONE] = next.tapZonePreset.name
+            prefs[Keys.READING_MODE] = next.readingMode.name
             prefs[Keys.HORIZONTAL_GESTURE_MODE] = next.horizontalGestureMode.name
             prefs[Keys.VOLUME_PAGING] = next.volumeKeyPaging
             prefs[Keys.SWIPE_BRIGHTNESS] = next.swipeBrightness
@@ -281,6 +288,7 @@ class PreferencesRepository(private val context: Context) {
             }
             prefs[Keys.APP_ACCENT] = next.appAccent.name
             prefs[Keys.LIBRARY_DENSITY] = next.libraryDensity.name
+            prefs[Keys.GROUP_SERIES_IN_LIBRARY] = next.groupSeriesInLibrary
             prefs[Keys.COMIC_RTL] = next.comicRtl
             prefs[Keys.COMIC_DOUBLE_SPREAD] = next.comicDoubleSpread
             prefs[Keys.PDF_MARGIN_CROP] = next.pdfMarginCrop

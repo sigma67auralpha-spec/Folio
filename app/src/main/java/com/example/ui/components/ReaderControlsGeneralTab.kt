@@ -17,6 +17,7 @@ import com.example.data.model.HorizontalGestureMode
 import com.example.data.model.OrientationLock
 import com.example.data.model.PageAnimation
 import com.example.data.model.ReaderPreferences
+import com.example.data.model.ReaderReadingMode
 import com.example.data.model.TapZonePreset
 import kotlin.math.roundToInt
 
@@ -31,6 +32,19 @@ internal fun ReaderControlsGeneralTab(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         ControlsSectionTitle("Reading Mode & Gestures")
+        Text("Reading Layout", style = MaterialTheme.typography.bodyMedium)
+        ControlsSegmentedRow(
+            options = ReaderReadingMode.entries,
+            selected = preferences.readingMode,
+            labelOf = {
+                when (it) {
+                    ReaderReadingMode.SCROLL -> "Scroll"
+                    ReaderReadingMode.PAGED -> "Page-by-Page"
+                }
+            },
+            onSelect = { mode -> onUpdatePrefs { it.copy(readingMode = mode) } }
+        )
+
         Text("Horizontal Swipe Gesture", style = MaterialTheme.typography.bodyMedium)
         ControlsSegmentedRow(
             options = HorizontalGestureMode.entries,

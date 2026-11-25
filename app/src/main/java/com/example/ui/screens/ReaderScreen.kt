@@ -52,6 +52,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -113,6 +115,9 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -121,19 +126,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.Hyphens
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextIndent
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.em
-import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -154,11 +153,14 @@ import com.example.data.model.PageAnimation
 import com.example.data.model.ProgressDisplayMode
 import com.example.data.model.ReaderFont
 import com.example.data.model.ReaderPreferences
+import com.example.data.model.ReaderReadingMode
 import com.example.data.model.ReaderTextAlignment
 import com.example.data.model.ReaderThemeMode
 import com.example.data.model.TapZonePreset
 import com.example.data.model.defaultReaderColorPresets
+import com.example.engine.BookChapter
 import com.example.engine.BlockStyle
+import com.example.engine.ParagraphBlock
 import com.example.engine.TextRun
 import com.example.ui.components.HighlightNoteDialog
 import com.example.ui.components.ReaderControlsSheet
@@ -192,30 +194,6 @@ import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
-
-internal fun bionicWordRanges(text: String): List<IntRange> {
-    if (text.isEmpty()) return emptyList()
-    val ranges = mutableListOf<IntRange>()
-    var i = 0
-    val n = text.length
-    while (i < n) {
-        if (Character.isLetterOrDigit(text[i])) {
-            val start = i
-            while (i < n && Character.isLetterOrDigit(text[i])) i++
-            val len = i - start
-            val boldLen = when {
-                len <= 1 -> 1
-                len <= 3 -> 1
-                len <= 6 -> 2
-                else -> (len * 0.45f).roundToInt().coerceIn(2, len - 1)
-            }
-            ranges.add(start until (start + boldLen))
-        } else {
-            i++
-        }
-    }
-    return ranges
-}
 
 @Composable
 fun ReaderScreen(
@@ -269,6 +247,14 @@ fun ReaderScreen(
     var presetToast by remember { mutableStateOf<String?>(null) }
     var restoredInitialScroll by remember(bookId) { mutableStateOf(false) }
     var previousUnit by remember(bookId) { mutableIntStateOf(-1) }
+    var pendingTargetParagraph by remember(bookId) { mutableStateOf<Int?>(null) }
+    var pendingJumpToLastPage by remember(bookId) { mutableStateOf(false) }
+    var pagedScrollFraction by remember(bookId) { mutableFloatStateOf(0f) }
+    var currentPagedPageNumber by remember(bookId) { mutableIntStateOf(1) }
+    var currentPagedTotalPages by remember(bookId) { mutableIntStateOf(1) }
+    var lastActiveParagraph by remember(bookId) { mutableIntStateOf(0) }
+    var onStepForward by remember(bookId) { mutableStateOf<() -> Unit>({ readerViewModel.nextUnit() }) }
+    var onStepBackward by remember(bookId) { mutableStateOf<() -> Unit>({ readerViewModel.previousUnit() }) }
 
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
@@ -390,14 +376,32 @@ fun ReaderScreen(
             if (total <= 1) 0f else (listState.firstVisibleItemIndex.toFloat() / (total - 1).coerceAtLeast(1)).coerceIn(0f, 1f)
         }
     }
+    val activeScrollFraction = if (
+        contentState is ReaderContentState.Reflowable &&
+        prefs.readingMode == ReaderReadingMode.PAGED
+    ) {
+        pagedScrollFraction
+    } else {
+        scrollFraction
+    }
 
-    LaunchedEffect(currentUnit, listState.firstVisibleItemIndex) {
-        readerViewModel.recordUserReadingActivity()
+    LaunchedEffect(contentState is ReaderContentState.Reflowable, prefs.readingMode) {
+        if (contentState !is ReaderContentState.Reflowable || prefs.readingMode == ReaderReadingMode.SCROLL) {
+            onStepForward = { readerViewModel.nextUnit() }
+            onStepBackward = { readerViewModel.previousUnit() }
+        }
+    }
+
+    LaunchedEffect(currentUnit, listState.firstVisibleItemIndex, prefs.readingMode) {
+        if (prefs.readingMode == ReaderReadingMode.SCROLL) {
+            lastActiveParagraph = listState.firstVisibleItemIndex
+            readerViewModel.recordUserReadingActivity()
+        }
     }
 
     BackHandler {
         readerViewModel.setReaderForeground(false)
-        readerViewModel.saveScrollProgress(scrollFraction)
+        readerViewModel.saveScrollProgress(activeScrollFraction)
         readerViewModel.ttsManager.stop()
         onBack()
     }
@@ -421,11 +425,11 @@ fun ReaderScreen(
                 if (prefs.volumeKeyPaging && ev.type == KeyEventType.KeyDown) {
                     when (ev.key) {
                         Key.VolumeDown -> {
-                            readerViewModel.nextUnit()
+                            onStepForward()
                             true
                         }
                         Key.VolumeUp -> {
-                            readerViewModel.previousUnit()
+                            onStepBackward()
                             true
                         }
                         else -> false
@@ -451,23 +455,31 @@ fun ReaderScreen(
                 }
             }
             is ReaderContentState.Reflowable -> {
-                LaunchedEffect(currentUnit, state.chapters.size) {
-                    val activeChapter = state.chapters.getOrNull(currentUnit)
-                    if (!restoredInitialScroll && activeChapter != null && book != null) {
-                        restoredInitialScroll = true
-                        val savedFrac = book?.scrollFraction ?: 0f
-                        val targetItem = (savedFrac * (activeChapter.blocks.size - 1).coerceAtLeast(0)).roundToInt()
-                        if (targetItem > 0) listState.scrollToItem(targetItem)
-                        previousUnit = currentUnit
-                    } else if (previousUnit != -1 && previousUnit != currentUnit) {
-                        listState.scrollToItem(0)
-                        previousUnit = currentUnit
+                LaunchedEffect(currentUnit, state.chapters.size, prefs.readingMode, pendingTargetParagraph) {
+                    if (prefs.readingMode == ReaderReadingMode.SCROLL) {
+                        val activeChapter = state.chapters.getOrNull(currentUnit)
+                        val jumpPara = pendingTargetParagraph
+                        if (jumpPara != null && activeChapter != null) {
+                            listState.scrollToItem(jumpPara.coerceIn(0, (activeChapter.blocks.size - 1).coerceAtLeast(0)))
+                            pendingTargetParagraph = null
+                            restoredInitialScroll = true
+                            previousUnit = currentUnit
+                        } else if (!restoredInitialScroll && activeChapter != null && book != null) {
+                            restoredInitialScroll = true
+                            val savedFrac = book?.scrollFraction ?: 0f
+                            val targetItem = (savedFrac * (activeChapter.blocks.size - 1).coerceAtLeast(0)).roundToInt()
+                            if (targetItem > 0) listState.scrollToItem(targetItem)
+                            previousUnit = currentUnit
+                        } else if (previousUnit != -1 && previousUnit != currentUnit) {
+                            listState.scrollToItem(0)
+                            previousUnit = currentUnit
+                        }
                     }
                 }
 
-                LaunchedEffect(ttsState.currentParagraphIndex) {
+                LaunchedEffect(ttsState.currentParagraphIndex, prefs.readingMode) {
                     val idx = ttsState.currentParagraphIndex
-                    if (ttsState.isSpeaking && idx >= 0) {
+                    if (prefs.readingMode == ReaderReadingMode.SCROLL && ttsState.isSpeaking && idx >= 0) {
                         listState.animateScrollToItem(idx)
                     }
                 }
@@ -500,13 +512,13 @@ fun ReaderScreen(
                     val h = containerHeightPx.coerceAtLeast(1f)
                     when (prefs.tapZonePreset) {
                         TapZonePreset.CLASSIC_LR -> when {
-                            localOffset.x < w * 0.28f -> readerViewModel.previousUnit()
-                            localOffset.x > w * 0.72f -> readerViewModel.nextUnit()
+                            localOffset.x < w * 0.28f -> onStepBackward()
+                            localOffset.x > w * 0.72f -> onStepForward()
                             else -> showOverlay = !showOverlay
                         }
                         TapZonePreset.ONE_HAND_RIGHT -> when {
-                            localOffset.y < h * 0.30f -> readerViewModel.previousUnit()
-                            localOffset.x > w * 0.65f || localOffset.y > h * 0.72f -> readerViewModel.nextUnit()
+                            localOffset.y < h * 0.30f -> onStepBackward()
+                            localOffset.x > w * 0.65f || localOffset.y > h * 0.72f -> onStepForward()
                             else -> showOverlay = !showOverlay
                         }
                         TapZonePreset.SCROLL_ONLY -> showOverlay = !showOverlay
@@ -522,11 +534,15 @@ fun ReaderScreen(
                             containerWidthPx = coords.size.width.toFloat()
                             containerHeightPx = coords.size.height.toFloat()
                         }
-                        .pointerInput(prefs.tapZonePreset) {
+                        .pointerInput(prefs.tapZonePreset, prefs.readingMode) {
                             detectTapGestures { offset -> handleReflowableTap(offset) }
                         }
-                        .pointerInput(prefs.horizontalGestureMode, swipeThresholdPx) {
-                            if (prefs.horizontalGestureMode == HorizontalGestureMode.OFF) return@pointerInput
+                        .pointerInput(prefs.readingMode, prefs.horizontalGestureMode, swipeThresholdPx) {
+                            if (prefs.readingMode == ReaderReadingMode.PAGED ||
+                                prefs.horizontalGestureMode == HorizontalGestureMode.OFF
+                            ) {
+                                return@pointerInput
+                            }
                             var totalDrag = 0f
                             detectHorizontalDragGestures(
                                 onDragStart = { totalDrag = 0f },
@@ -545,6 +561,10 @@ fun ReaderScreen(
                             )
                         }
                 ) {
+                    val boxMaxWidthPx = constraints.maxWidth
+                    val boxMaxHeightPx = constraints.maxHeight
+                    val textMeasurer = rememberTextMeasurer(cacheSize = 64)
+
                     AnimatedContent(
                         targetState = currentUnit,
                         transitionSpec = {
@@ -591,171 +611,338 @@ fun ReaderScreen(
                             }
                         }
 
+                        val doubleTapActionFor: (Int, ParagraphBlock) -> (() -> Unit)? = { pIdx, block ->
+                            if (prefs.doubleTapAction == DoubleTapAction.OFF) {
+                                null
+                            } else {
+                                {
+                                    readerViewModel.recordUserReadingActivity()
+                                    when (prefs.doubleTapAction) {
+                                        DoubleTapAction.SPEAK_PARAGRAPH -> {
+                                            if (ttsState.isSpeaking && ttsState.currentParagraphIndex == pIdx) {
+                                                readerViewModel.ttsManager.stop()
+                                            } else {
+                                                val blocks = chapter.blocks.map { it.text }
+                                                readerViewModel.ttsManager.updateVoiceParams(prefs.ttsRate, prefs.ttsPitch)
+                                                readerViewModel.ttsManager.startReading(blocks, pIdx)
+                                            }
+                                        }
+                                        DoubleTapAction.QUICK_HIGHLIGHT -> {
+                                            if (prefs.enableHighlights) {
+                                                readerViewModel.addHighlight(
+                                                    chapter.index,
+                                                    pIdx,
+                                                    block.text,
+                                                    "",
+                                                    HighlightColor.AMBER
+                                                )
+                                            }
+                                        }
+                                        DoubleTapAction.EXTERNAL_TRANSLATE -> {
+                                            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                                type = "text/plain"
+                                                putExtra(Intent.EXTRA_TEXT, block.text)
+                                            }
+                                            val chooser = Intent.createChooser(sendIntent, "Translate paragraph with")
+                                            runCatching { context.startActivity(chooser) }.onFailure {
+                                                coroutineScope.launch {
+                                                    snackbarHostState.showSnackbar("No translator or text app available.")
+                                                }
+                                            }
+                                        }
+                                        DoubleTapAction.OFF -> Unit
+                                    }
+                                }
+                            }
+                        }
+
                         Box(modifier = Modifier.fillMaxSize()) {
-                            LazyColumn(
-                                state = listState,
-                                contentPadding = PaddingValues(
-                                    start = prefs.horizontalMarginDp.dp,
-                                    end = prefs.horizontalMarginDp.dp,
-                                    top = prefs.verticalPaddingDp.dp + 12.dp,
-                                    bottom = (78f + prefs.bottomBarMarginDp).dp
-                                ),
-                                verticalArrangement = Arrangement.spacedBy(prefs.paragraphSpacingDp.dp),
-                                modifier = Modifier
-                                    .widthIn(max = prefs.maxColumnWidthDp.dp)
-                                    .align(Alignment.TopCenter)
-                                    .fillMaxHeight()
-                                    .drawWithContent {
-                                        drawContent()
-                                        if (prefs.perceptionExpander) {
-                                            val xLeft = size.width * 0.14f
-                                            val xRight = size.width * 0.86f
-                                            val guideColor = inkColor.copy(alpha = 0.16f)
-                                            val strokePx = 1.2.dp.toPx()
-                                            drawLine(guideColor, Offset(xLeft, 0f), Offset(xLeft, size.height), strokeWidth = strokePx)
-                                            drawLine(guideColor, Offset(xRight, 0f), Offset(xRight, size.height), strokeWidth = strokePx)
+                            if (prefs.readingMode == ReaderReadingMode.PAGED) {
+                                val maxColPx = with(density) { prefs.maxColumnWidthDp.dp.roundToPx() }
+                                val horizMarginPx = with(density) { prefs.horizontalMarginDp.dp.roundToPx() }
+                                val topPadPx = with(density) { (prefs.verticalPaddingDp + 12f).dp.roundToPx() }
+                                val footerReserveDp = (if (prefs.showReaderFooter || prefs.showProgressBars) 46f else 14f) +
+                                    prefs.bottomBarMarginDp + prefs.verticalPaddingDp
+                                val footerReservePx = with(density) { footerReserveDp.dp.roundToPx() }
+                                val colWidthPx = minOf(boxMaxWidthPx, maxColPx)
+                                val pageContentWidthPx = (colWidthPx - horizMarginPx * 2).coerceAtLeast(120)
+                                val pageContentHeightPx = (boxMaxHeightPx - topPadPx - footerReservePx).coerceAtLeast(160)
+
+                                val pages = remember(
+                                    chapter.index,
+                                    chapter.blocks,
+                                    pageContentWidthPx,
+                                    pageContentHeightPx,
+                                    prefs.fontSizeSp,
+                                    prefs.lineHeightMultiplier,
+                                    prefs.letterSpacingEm,
+                                    prefs.paragraphSpacingDp,
+                                    prefs.firstLineIndentDp,
+                                    prefs.readerFont,
+                                    prefs.readerFontWeight,
+                                    prefs.italicText,
+                                    prefs.textAlignment,
+                                    prefs.chapterTitleAlignment,
+                                    prefs.autoHyphenation,
+                                    prefs.bionicReading,
+                                    prefs.showImages,
+                                    prefs.showImageCaptions,
+                                    prefs.imageWidthPercent,
+                                    prefs.customFontPath
+                                ) {
+                                    paginateChapterBlocks(
+                                        blocks = chapter.blocks,
+                                        prefs = prefs,
+                                        fontFamily = readerFontFamily,
+                                        inkColor = inkColor,
+                                        textMeasurer = textMeasurer,
+                                        contentWidthPx = pageContentWidthPx,
+                                        contentHeightPx = pageContentHeightPx,
+                                        density = density
+                                    )
+                                }
+
+                                val initialPage = remember(targetUnit, pages.size) {
+                                    when {
+                                        pendingTargetParagraph != null -> findPageForParagraph(pages, pendingTargetParagraph!!)
+                                        pendingJumpToLastPage -> pages.lastIndex.coerceAtLeast(0)
+                                        !restoredInitialScroll && book != null -> {
+                                            val frac = book?.scrollFraction ?: 0f
+                                            (frac * (pages.size - 1).coerceAtLeast(0)).roundToInt()
+                                        }
+                                        restoredInitialScroll && targetUnit == currentUnit && lastActiveParagraph > 0 ->
+                                            findPageForParagraph(pages, lastActiveParagraph)
+                                        else -> 0
+                                    }.coerceIn(0, (pages.size - 1).coerceAtLeast(0))
+                                }
+
+                                val pagerState = rememberPagerState(initialPage = initialPage) {
+                                    pages.size.coerceAtLeast(1)
+                                }
+
+                                if (targetUnit == currentUnit) {
+                                    LaunchedEffect(pages, pendingTargetParagraph, pendingJumpToLastPage, restoredInitialScroll) {
+                                        val targetPara = pendingTargetParagraph
+                                        when {
+                                            targetPara != null -> {
+                                                pendingTargetParagraph = null
+                                                restoredInitialScroll = true
+                                                previousUnit = currentUnit
+                                                pagerState.scrollToPage(findPageForParagraph(pages, targetPara))
+                                            }
+                                            pendingJumpToLastPage -> {
+                                                pendingJumpToLastPage = false
+                                                restoredInitialScroll = true
+                                                previousUnit = currentUnit
+                                                pagerState.scrollToPage(pages.lastIndex.coerceAtLeast(0))
+                                            }
+                                            !restoredInitialScroll && book != null -> {
+                                                restoredInitialScroll = true
+                                                previousUnit = currentUnit
+                                                val frac = book?.scrollFraction ?: 0f
+                                                val p = (frac * (pages.size - 1).coerceAtLeast(0)).roundToInt()
+                                                    .coerceIn(0, (pages.size - 1).coerceAtLeast(0))
+                                                pagerState.scrollToPage(p)
+                                            }
+                                            previousUnit != -1 && previousUnit != currentUnit -> {
+                                                previousUnit = currentUnit
+                                                pagerState.scrollToPage(0)
+                                            }
                                         }
                                     }
-                            ) {
-                                itemsIndexed(
-                                    items = chapter.blocks,
-                                    key = { pIdx, _ -> "${chapter.index}_$pIdx" }
-                                ) { pIdx, block ->
-                                    val paraHighlights = chapterHighlightsByPara[pIdx].orEmpty()
-                                    val isTtsActive = ttsState.isSpeaking && ttsState.currentParagraphIndex == pIdx
-                                    if (block.style == BlockStyle.IMAGE) {
-                                        val imgFile = block.imagePath?.let { File(it) }
-                                        if (prefs.showImages && imgFile != null && imgFile.exists()) {
-                                            val imgAlign = when (prefs.imageAlignment) {
-                                                ReaderTextAlignment.START -> Alignment.Start
-                                                ReaderTextAlignment.END -> Alignment.End
-                                                else -> Alignment.CenterHorizontally
+
+                                    LaunchedEffect(pagerState.currentPage, pages) {
+                                        val maxIdx = (pages.size - 1).coerceAtLeast(1)
+                                        pagedScrollFraction = if (pages.size <= 1) 0f else {
+                                            (pagerState.currentPage.toFloat() / maxIdx).coerceIn(0f, 1f)
+                                        }
+                                        currentPagedPageNumber = pagerState.currentPage + 1
+                                        currentPagedTotalPages = pages.size.coerceAtLeast(1)
+                                        lastActiveParagraph = pages.getOrNull(pagerState.currentPage)?.firstParagraphIndex ?: 0
+                                        readerViewModel.recordUserReadingActivity()
+                                    }
+
+                                    LaunchedEffect(pagerState.isScrollInProgress, prefs.hideBarsOnFastScroll) {
+                                        if (prefs.hideBarsOnFastScroll && pagerState.isScrollInProgress && showOverlay && !showSearchBar) {
+                                            showOverlay = false
+                                        }
+                                    }
+
+                                    LaunchedEffect(ttsState.currentParagraphIndex, ttsState.isSpeaking, pages) {
+                                        val idx = ttsState.currentParagraphIndex
+                                        if (ttsState.isSpeaking && idx >= 0) {
+                                            val targetPg = findPageForParagraph(pages, idx)
+                                            if (targetPg != pagerState.currentPage) {
+                                                pagerState.animateScrollToPage(targetPg)
                                             }
-                                            val captionTextAlign = when (prefs.imageAlignment) {
-                                                ReaderTextAlignment.START -> TextAlign.Start
-                                                ReaderTextAlignment.END -> TextAlign.End
-                                                else -> TextAlign.Center
+                                        }
+                                    }
+
+                                    LaunchedEffect(pagerState.currentPage, pages.size, currentUnit, state.chapters.size) {
+                                        onStepForward = {
+                                            readerViewModel.recordUserReadingActivity()
+                                            if (pagerState.currentPage < pages.lastIndex) {
+                                                coroutineScope.launch {
+                                                    pagerState.animateScrollToPage(pagerState.currentPage + 1)
+                                                }
+                                            } else {
+                                                readerViewModel.nextUnit()
                                             }
-                                            Column(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                horizontalAlignment = imgAlign
-                                            ) {
-                                                AsyncImage(
-                                                    model = imgFile,
-                                                    contentDescription = block.text,
-                                                    contentScale = ContentScale.Fit,
-                                                    colorFilter = imgColorFilter,
-                                                    modifier = Modifier
-                                                        .fillMaxWidth(prefs.imageWidthPercent.coerceIn(0.35f, 1.0f))
-                                                        .heightIn(max = 360.dp)
-                                                        .clip(RoundedCornerShape(prefs.imageCornerRadiusDp.dp))
-                                                )
-                                                if (prefs.showImageCaptions &&
-                                                    block.text.isNotBlank() &&
-                                                    !block.text.equals("image", ignoreCase = true) &&
-                                                    !block.text.equals("cover", ignoreCase = true)
+                                        }
+                                        onStepBackward = {
+                                            readerViewModel.recordUserReadingActivity()
+                                            if (pagerState.currentPage > 0) {
+                                                coroutineScope.launch {
+                                                    pagerState.animateScrollToPage(pagerState.currentPage - 1)
+                                                }
+                                            } else if (currentUnit > 0) {
+                                                pendingJumpToLastPage = true
+                                                readerViewModel.previousUnit()
+                                            }
+                                        }
+                                    }
+                                }
+
+                                val reverseLayout = prefs.horizontalGestureMode == HorizontalGestureMode.INVERTED
+                                val edgeSwipeThresholdPx = with(density) { 48.dp.toPx() }
+                                var edgeOverswipeAccum by remember(targetUnit) { mutableFloatStateOf(0f) }
+                                val boundaryNestedScroll = remember(
+                                    targetUnit,
+                                    pages.size,
+                                    reverseLayout,
+                                    state.chapters.size
+                                ) {
+                                    object : NestedScrollConnection {
+                                        override fun onPostScroll(
+                                            consumed: Offset,
+                                            available: Offset,
+                                            source: NestedScrollSource
+                                        ): Offset {
+                                            if (source == NestedScrollSource.UserInput && available.x != 0f) {
+                                                val forwardDelta = if (reverseLayout) available.x else -available.x
+                                                val atLastPage = pagerState.currentPage >= pages.lastIndex
+                                                val atFirstPage = pagerState.currentPage <= 0
+                                                if ((atLastPage && forwardDelta > 0f && targetUnit < state.chapters.lastIndex) ||
+                                                    (atFirstPage && forwardDelta < 0f && targetUnit > 0)
                                                 ) {
-                                                    Spacer(Modifier.height(4.dp))
-                                                    Text(
-                                                        text = block.text,
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        fontStyle = FontStyle.Italic,
-                                                        color = inkColor.copy(alpha = 0.65f),
-                                                        textAlign = captionTextAlign,
-                                                        modifier = Modifier.fillMaxWidth(prefs.imageWidthPercent.coerceIn(0.35f, 1.0f))
-                                                    )
+                                                    edgeOverswipeAccum += forwardDelta
                                                 }
                                             }
+                                            return Offset.Zero
                                         }
-                                    } else {
-                                        val doubleTapHandler: (() -> Unit)? = if (prefs.doubleTapAction == DoubleTapAction.OFF) {
-                                            null
-                                        } else {
-                                            {
+
+                                        override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+                                            val accum = edgeOverswipeAccum
+                                            edgeOverswipeAccum = 0f
+                                            if (accum >= edgeSwipeThresholdPx &&
+                                                pagerState.currentPage >= pages.lastIndex &&
+                                                targetUnit < state.chapters.lastIndex
+                                            ) {
                                                 readerViewModel.recordUserReadingActivity()
-                                                when (prefs.doubleTapAction) {
-                                                    DoubleTapAction.SPEAK_PARAGRAPH -> {
-                                                        if (ttsState.isSpeaking && ttsState.currentParagraphIndex == pIdx) {
-                                                            readerViewModel.ttsManager.stop()
-                                                        } else {
-                                                            val blocks = chapter.blocks.map { it.text }
-                                                            readerViewModel.ttsManager.updateVoiceParams(prefs.ttsRate, prefs.ttsPitch)
-                                                            readerViewModel.ttsManager.startReading(blocks, pIdx)
-                                                        }
-                                                    }
-                                                    DoubleTapAction.QUICK_HIGHLIGHT -> {
-                                                        if (prefs.enableHighlights) {
-                                                            readerViewModel.addHighlight(
-                                                                chapter.index,
-                                                                pIdx,
-                                                                block.text,
-                                                                "",
-                                                                HighlightColor.AMBER
-                                                            )
-                                                        }
-                                                    }
-                                                    DoubleTapAction.EXTERNAL_TRANSLATE -> {
-                                                        val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                                                            type = "text/plain"
-                                                            putExtra(Intent.EXTRA_TEXT, block.text)
-                                                        }
-                                                        val chooser = Intent.createChooser(sendIntent, "Translate paragraph with")
-                                                        runCatching { context.startActivity(chooser) }.onFailure {
-                                                            coroutineScope.launch {
-                                                                snackbarHostState.showSnackbar("No translator or text app available.")
-                                                            }
-                                                        }
-                                                    }
-                                                    DoubleTapAction.OFF -> Unit
-                                                }
+                                                readerViewModel.nextUnit()
+                                            } else if (accum <= -edgeSwipeThresholdPx &&
+                                                pagerState.currentPage <= 0 &&
+                                                targetUnit > 0
+                                            ) {
+                                                readerViewModel.recordUserReadingActivity()
+                                                pendingJumpToLastPage = true
+                                                readerViewModel.previousUnit()
                                             }
+                                            return Velocity.Zero
                                         }
-                                        Column {
-                                            ReflowableBlockView(
-                                                text = block.text,
-                                                style = block.style,
-                                                runs = block.runs,
-                                                highlights = if (prefs.enableHighlights) paraHighlights else emptyList(),
-                                                isTtsHighlighted = isTtsActive,
-                                                prefs = prefs,
-                                                fontFamily = readerFontFamily,
-                                                inkColor = inkColor,
-                                                onTapRoot = { rootOffset ->
-                                                    handleReflowableTap(rootOffset - containerRootPos)
-                                                },
-                                                onLongPress = {
-                                                    if (prefs.enableHighlights) {
-                                                        pendingHighlightTarget = Triple(chapter.index, pIdx, block.text)
+                                    }
+                                }
+
+                                HorizontalPager(
+                                    state = pagerState,
+                                    reverseLayout = reverseLayout,
+                                    userScrollEnabled = prefs.horizontalGestureMode != HorizontalGestureMode.OFF,
+                                    beyondViewportPageCount = 1,
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .nestedScroll(boundaryNestedScroll)
+                                ) { pageIdx ->
+                                    val chapterPage = pages.getOrNull(pageIdx)
+                                    Box(modifier = Modifier.fillMaxSize()) {
+                                        Column(
+                                            verticalArrangement = Arrangement.spacedBy(prefs.paragraphSpacingDp.dp),
+                                            modifier = Modifier
+                                                .widthIn(max = prefs.maxColumnWidthDp.dp)
+                                                .align(Alignment.TopCenter)
+                                                .fillMaxHeight()
+                                                .padding(
+                                                    start = prefs.horizontalMarginDp.dp,
+                                                    end = prefs.horizontalMarginDp.dp,
+                                                    top = prefs.verticalPaddingDp.dp + 12.dp,
+                                                    bottom = footerReserveDp.dp
+                                                )
+                                                .drawWithContent {
+                                                    drawContent()
+                                                    if (prefs.perceptionExpander) {
+                                                        val xLeft = size.width * 0.14f
+                                                        val xRight = size.width * 0.86f
+                                                        val guideColor = inkColor.copy(alpha = 0.16f)
+                                                        val strokePx = 1.2.dp.toPx()
+                                                        drawLine(guideColor, Offset(xLeft, 0f), Offset(xLeft, size.height), strokeWidth = strokePx)
+                                                        drawLine(guideColor, Offset(xRight, 0f), Offset(xRight, size.height), strokeWidth = strokePx)
                                                     }
-                                                },
-                                                onDoubleTap = doubleTapHandler
-                                            )
-                                            if (prefs.enableHighlights) {
-                                                paraHighlights.filter { it.noteText.isNotBlank() }.forEach { hl ->
-                                                    Spacer(Modifier.height(4.dp))
-                                                    Surface(
-                                                        shape = RoundedCornerShape(8.dp),
-                                                        color = Color(hl.color.hex).copy(alpha = 0.28f),
-                                                        modifier = Modifier
-                                                            .fillMaxWidth()
-                                                            .clickable { editingHighlight = hl }
-                                                    ) {
-                                                        Row(
-                                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                                            verticalAlignment = Alignment.CenterVertically
-                                                        ) {
-                                                            Icon(
-                                                                Icons.Outlined.EditNote,
-                                                                contentDescription = "Margin note",
-                                                                tint = inkColor.copy(alpha = 0.75f),
-                                                                modifier = Modifier.size(16.dp)
+                                                }
+                                        ) {
+                                            chapterPage?.slices?.forEach { slice ->
+                                                when (slice) {
+                                                    is PageSlice.DividerSlice -> {
+                                                        HorizontalDivider(
+                                                            color = inkColor.copy(alpha = 0.22f),
+                                                            modifier = Modifier.padding(vertical = 8.dp)
+                                                        )
+                                                    }
+                                                    is PageSlice.ImageSlice -> {
+                                                        ReflowableImageBlock(
+                                                            block = slice.block,
+                                                            prefs = prefs,
+                                                            inkColor = inkColor,
+                                                            imgColorFilter = imgColorFilter,
+                                                            maxHeightDp = 280
+                                                        )
+                                                    }
+                                                    is PageSlice.TextSlice -> {
+                                                        val paraHighlights = chapterHighlightsByPara[slice.paragraphIndex].orEmpty()
+                                                        val isTtsActive = ttsState.isSpeaking &&
+                                                            ttsState.currentParagraphIndex == slice.paragraphIndex
+                                                        Column {
+                                                            ReflowableBlockView(
+                                                                text = slice.block.text,
+                                                                style = slice.block.style,
+                                                                runs = slice.block.runs,
+                                                                highlights = if (prefs.enableHighlights) paraHighlights else emptyList(),
+                                                                isTtsHighlighted = isTtsActive,
+                                                                prefs = prefs,
+                                                                fontFamily = readerFontFamily,
+                                                                inkColor = inkColor,
+                                                                startChar = slice.startChar,
+                                                                endChar = slice.endChar,
+                                                                omitFirstLineIndent = slice.isContinuation,
+                                                                onTapRoot = { rootOffset ->
+                                                                    handleReflowableTap(rootOffset - containerRootPos)
+                                                                },
+                                                                onLongPress = {
+                                                                    if (prefs.enableHighlights) {
+                                                                        pendingHighlightTarget = Triple(
+                                                                            chapter.index,
+                                                                            slice.paragraphIndex,
+                                                                            slice.block.text
+                                                                        )
+                                                                    }
+                                                                },
+                                                                onDoubleTap = doubleTapActionFor(slice.paragraphIndex, slice.block)
                                                             )
-                                                            Spacer(Modifier.width(6.dp))
-                                                            Text(
-                                                                text = hl.noteText,
-                                                                style = MaterialTheme.typography.bodySmall,
-                                                                color = inkColor.copy(alpha = 0.88f)
-                                                            )
+                                                            if (prefs.enableHighlights && !slice.isContinuation) {
+                                                                HighlightMarginNotes(
+                                                                    paraHighlights = paraHighlights,
+                                                                    inkColor = inkColor,
+                                                                    onEdit = { editingHighlight = it }
+                                                                )
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -763,22 +950,94 @@ fun ReaderScreen(
                                         }
                                     }
                                 }
+                            } else {
+                                LazyColumn(
+                                    state = listState,
+                                    contentPadding = PaddingValues(
+                                        start = prefs.horizontalMarginDp.dp,
+                                        end = prefs.horizontalMarginDp.dp,
+                                        top = prefs.verticalPaddingDp.dp + 12.dp,
+                                        bottom = (78f + prefs.bottomBarMarginDp).dp
+                                    ),
+                                    verticalArrangement = Arrangement.spacedBy(prefs.paragraphSpacingDp.dp),
+                                    modifier = Modifier
+                                        .widthIn(max = prefs.maxColumnWidthDp.dp)
+                                        .align(Alignment.TopCenter)
+                                        .fillMaxHeight()
+                                        .drawWithContent {
+                                            drawContent()
+                                            if (prefs.perceptionExpander) {
+                                                val xLeft = size.width * 0.14f
+                                                val xRight = size.width * 0.86f
+                                                val guideColor = inkColor.copy(alpha = 0.16f)
+                                                val strokePx = 1.2.dp.toPx()
+                                                drawLine(guideColor, Offset(xLeft, 0f), Offset(xLeft, size.height), strokeWidth = strokePx)
+                                                drawLine(guideColor, Offset(xRight, 0f), Offset(xRight, size.height), strokeWidth = strokePx)
+                                            }
+                                        }
+                                ) {
+                                    itemsIndexed(
+                                        items = chapter.blocks,
+                                        key = { pIdx, _ -> "${chapter.index}_$pIdx" }
+                                    ) { pIdx, block ->
+                                        val paraHighlights = chapterHighlightsByPara[pIdx].orEmpty()
+                                        val isTtsActive = ttsState.isSpeaking && ttsState.currentParagraphIndex == pIdx
+                                        if (block.style == BlockStyle.IMAGE) {
+                                            ReflowableImageBlock(
+                                                block = block,
+                                                prefs = prefs,
+                                                inkColor = inkColor,
+                                                imgColorFilter = imgColorFilter,
+                                                maxHeightDp = 360
+                                            )
+                                        } else {
+                                            Column {
+                                                ReflowableBlockView(
+                                                    text = block.text,
+                                                    style = block.style,
+                                                    runs = block.runs,
+                                                    highlights = if (prefs.enableHighlights) paraHighlights else emptyList(),
+                                                    isTtsHighlighted = isTtsActive,
+                                                    prefs = prefs,
+                                                    fontFamily = readerFontFamily,
+                                                    inkColor = inkColor,
+                                                    onTapRoot = { rootOffset ->
+                                                        handleReflowableTap(rootOffset - containerRootPos)
+                                                    },
+                                                    onLongPress = {
+                                                        if (prefs.enableHighlights) {
+                                                            pendingHighlightTarget = Triple(chapter.index, pIdx, block.text)
+                                                        }
+                                                    },
+                                                    onDoubleTap = doubleTapActionFor(pIdx, block)
+                                                )
+                                                if (prefs.enableHighlights) {
+                                                    HighlightMarginNotes(
+                                                        paraHighlights = paraHighlights,
+                                                        inkColor = inkColor,
+                                                        onEdit = { editingHighlight = it }
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
 
-                                item {
-                                    Spacer(Modifier.height(16.dp))
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        if (targetUnit > 0) {
-                                            TextButton(
-                                                onClick = { readerViewModel.previousUnit() }
-                                            ) { Text("← Previous", color = inkColor) }
-                                        } else Spacer(Modifier.width(1.dp))
-                                        if (targetUnit < state.chapters.lastIndex) {
-                                            TextButton(
-                                                onClick = { readerViewModel.nextUnit() }
-                                            ) { Text("Next Chapter →", color = inkColor) }
+                                    item {
+                                        Spacer(Modifier.height(16.dp))
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            if (targetUnit > 0) {
+                                                TextButton(
+                                                    onClick = { readerViewModel.previousUnit() }
+                                                ) { Text("← Previous", color = inkColor) }
+                                            } else Spacer(Modifier.width(1.dp))
+                                            if (targetUnit < state.chapters.lastIndex) {
+                                                TextButton(
+                                                    onClick = { readerViewModel.nextUnit() }
+                                                ) { Text("Next Chapter →", color = inkColor) }
+                                            }
                                         }
                                     }
                                 }
@@ -786,15 +1045,21 @@ fun ReaderScreen(
 
                             // Subtle modular footer + progress bar
                             val totalChapters = state.chapters.size.coerceAtLeast(1)
-                            val overallPct = (((targetUnit + scrollFraction) / totalChapters.toFloat()) * 100f).coerceIn(0f, 100f)
+                            val unitProgress = if (prefs.readingMode == ReaderReadingMode.PAGED) pagedScrollFraction else scrollFraction
+                            val overallPct = (((targetUnit + unitProgress) / totalChapters.toFloat()) * 100f).coerceIn(0f, 100f)
+                            val activeBlockIndex = if (prefs.readingMode == ReaderReadingMode.PAGED) {
+                                lastActiveParagraph
+                            } else {
+                                listState.firstVisibleItemIndex
+                            }
                             val currentBlockPos = (chapterStartOffsets.getOrElse(targetUnit) { 0 } +
-                                listState.firstVisibleItemIndex + 1).coerceIn(1, totalGlobalBlocks)
+                                activeBlockIndex + 1).coerceIn(1, totalGlobalBlocks)
                             val chapterWords = remember(chapter.index, chapter.blocks.size) {
                                 chapter.blocks.sumOf { b ->
                                     if (b.text.isBlank()) 0 else b.text.trim().split(Regex("\\s+")).size
                                 }
                             }
-                            val minsRemaining = ((chapterWords * (1f - scrollFraction)) / 220f).roundToInt().coerceAtLeast(1)
+                            val minsRemaining = ((chapterWords * (1f - unitProgress)) / 220f).roundToInt().coerceAtLeast(1)
                             if (prefs.showReaderFooter || prefs.showProgressBars) {
                                 Column(
                                     modifier = Modifier
@@ -819,6 +1084,9 @@ fun ReaderScreen(
                                             )
                                             Spacer(Modifier.width(12.dp))
                                             val rightMeta = buildList {
+                                                if (prefs.readingMode == ReaderReadingMode.PAGED) {
+                                                    add("Pg $currentPagedPageNumber/$currentPagedTotalPages")
+                                                }
                                                 if (prefs.showEtaInReader && chapterWords > 40) add("~${minsRemaining}m")
                                                 when (prefs.progressDisplayMode) {
                                                     ProgressDisplayMode.PERCENT -> {
@@ -1067,7 +1335,7 @@ fun ReaderScreen(
                         IconButton(
                             onClick = {
                                 readerViewModel.setReaderForeground(false)
-                                readerViewModel.saveScrollProgress(scrollFraction)
+                                readerViewModel.saveScrollProgress(activeScrollFraction)
                                 readerViewModel.ttsManager.stop()
                                 onBack()
                             },
@@ -1139,9 +1407,12 @@ fun ReaderScreen(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .clickable {
+                                                pendingTargetParagraph = match.paragraphIndex
                                                 readerViewModel.selectChapter(match.chapterIndex)
-                                                coroutineScope.launch {
-                                                    listState.scrollToItem(match.paragraphIndex)
+                                                if (prefs.readingMode == ReaderReadingMode.SCROLL) {
+                                                    coroutineScope.launch {
+                                                        listState.scrollToItem(match.paragraphIndex)
+                                                    }
                                                 }
                                                 showSearchBar = false
                                                 showOverlay = false
@@ -1287,6 +1558,94 @@ fun ReaderScreen(
 }
 
 @Composable
+private fun ReflowableImageBlock(
+    block: ParagraphBlock,
+    prefs: ReaderPreferences,
+    inkColor: Color,
+    imgColorFilter: ColorFilter?,
+    maxHeightDp: Int
+) {
+    val imgFile = block.imagePath?.let { File(it) }
+    if (!prefs.showImages || imgFile == null || !imgFile.exists()) return
+    val imgAlign = when (prefs.imageAlignment) {
+        ReaderTextAlignment.START -> Alignment.Start
+        ReaderTextAlignment.END -> Alignment.End
+        else -> Alignment.CenterHorizontally
+    }
+    val captionTextAlign = when (prefs.imageAlignment) {
+        ReaderTextAlignment.START -> TextAlign.Start
+        ReaderTextAlignment.END -> TextAlign.End
+        else -> TextAlign.Center
+    }
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = imgAlign
+    ) {
+        AsyncImage(
+            model = imgFile,
+            contentDescription = block.text,
+            contentScale = ContentScale.Fit,
+            colorFilter = imgColorFilter,
+            modifier = Modifier
+                .fillMaxWidth(prefs.imageWidthPercent.coerceIn(0.35f, 1.0f))
+                .heightIn(max = maxHeightDp.dp)
+                .clip(RoundedCornerShape(prefs.imageCornerRadiusDp.dp))
+        )
+        if (prefs.showImageCaptions &&
+            block.text.isNotBlank() &&
+            !block.text.equals("image", ignoreCase = true) &&
+            !block.text.equals("cover", ignoreCase = true)
+        ) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = block.text,
+                style = MaterialTheme.typography.labelSmall,
+                fontStyle = FontStyle.Italic,
+                color = inkColor.copy(alpha = 0.65f),
+                textAlign = captionTextAlign,
+                modifier = Modifier.fillMaxWidth(prefs.imageWidthPercent.coerceIn(0.35f, 1.0f))
+            )
+        }
+    }
+}
+
+@Composable
+private fun HighlightMarginNotes(
+    paraHighlights: List<HighlightEntity>,
+    inkColor: Color,
+    onEdit: (HighlightEntity) -> Unit
+) {
+    paraHighlights.filter { it.noteText.isNotBlank() }.forEach { hl ->
+        Spacer(Modifier.height(4.dp))
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = Color(hl.color.hex).copy(alpha = 0.28f),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onEdit(hl) }
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Outlined.EditNote,
+                    contentDescription = "Margin note",
+                    tint = inkColor.copy(alpha = 0.75f),
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = hl.noteText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = inkColor.copy(alpha = 0.88f)
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun ReflowableBlockView(
     text: String,
     style: BlockStyle,
@@ -1296,6 +1655,9 @@ private fun ReflowableBlockView(
     prefs: ReaderPreferences,
     fontFamily: FontFamily,
     inkColor: Color,
+    startChar: Int = 0,
+    endChar: Int = text.length,
+    omitFirstLineIndent: Boolean = false,
     onTapRoot: (Offset) -> Unit,
     onLongPress: () -> Unit,
     onDoubleTap: (() -> Unit)? = null
@@ -1305,115 +1667,38 @@ private fun ReflowableBlockView(
         return
     }
 
-    val baseWeightValue = prefs.readerFontWeight.weightValue
-    val baseWeight = remember(baseWeightValue) { FontWeight(baseWeightValue) }
-    val bionicBoldWeight = remember(baseWeightValue) {
-        FontWeight((baseWeightValue + 300).coerceIn(600, 900))
-    }
-    val headingWeight = remember(baseWeightValue) {
-        FontWeight((baseWeightValue + 250).coerceIn(600, 800))
-    }
-    val baseFontStyle = if (prefs.italicText) FontStyle.Italic else FontStyle.Normal
-    val useBionic = prefs.bionicReading && (style == BlockStyle.BODY || style == BlockStyle.BLOCKQUOTE)
-
-    val annotated = remember(text, runs, highlights, isTtsHighlighted, useBionic, bionicBoldWeight) {
-        buildAnnotatedString {
-            append(text)
-            if (useBionic) {
-                bionicWordRanges(text).forEach { range ->
-                    addStyle(
-                        SpanStyle(fontWeight = bionicBoldWeight),
-                        range.first,
-                        range.last + 1
-                    )
-                }
-            }
-            runs.forEach { run ->
-                val s = run.start.coerceIn(0, text.length)
-                val e = run.end.coerceIn(s, text.length)
-                if (s < e) {
-                    addStyle(
-                        SpanStyle(
-                            fontWeight = if (run.bold) FontWeight.Bold else null,
-                            fontStyle = if (run.italic) FontStyle.Italic else null,
-                            fontFamily = if (run.code) JetBrainsMonoFontFamily else null,
-                            background = if (run.code) inkColor.copy(alpha = 0.08f) else Color.Unspecified
-                        ),
-                        s,
-                        e
-                    )
-                }
-            }
-            highlights.forEach { hl ->
-                addStyle(SpanStyle(background = Color(hl.color.hex)), 0, text.length)
-            }
-            if (isTtsHighlighted) {
-                addStyle(SpanStyle(background = Color(0x33C86D3B)), 0, text.length)
-            }
-        }
+    val annotated = remember(
+        text,
+        style,
+        runs,
+        highlights,
+        isTtsHighlighted,
+        prefs.bionicReading,
+        prefs.readerFontWeight,
+        inkColor,
+        startChar,
+        endChar
+    ) {
+        buildSliceAnnotatedString(
+            fullText = text,
+            style = style,
+            runs = runs,
+            highlights = highlights,
+            isTtsHighlighted = isTtsHighlighted,
+            prefs = prefs,
+            inkColor = inkColor,
+            startChar = startChar,
+            endChar = endChar
+        )
     }
 
-    val baseSize = prefs.fontSizeSp
-    val headingAlign = prefs.chapterTitleAlignment.toComposeTextAlign()
-    val bodyAlign = prefs.textAlignment.toComposeTextAlign()
-
-    val textStyle = when (style) {
-        BlockStyle.HEADING_1 -> TextStyle(
-            fontFamily = fontFamily,
-            fontSize = (baseSize * 1.45f).sp,
-            lineHeight = (baseSize * 1.45f * 1.25f).sp,
-            fontWeight = headingWeight,
-            fontStyle = baseFontStyle,
-            textAlign = headingAlign,
-            color = inkColor
-        )
-        BlockStyle.HEADING_2 -> TextStyle(
-            fontFamily = fontFamily,
-            fontSize = (baseSize * 1.25f).sp,
-            lineHeight = (baseSize * 1.25f * 1.3f).sp,
-            fontWeight = headingWeight,
-            fontStyle = baseFontStyle,
-            textAlign = headingAlign,
-            color = inkColor
-        )
-        BlockStyle.HEADING_3 -> TextStyle(
-            fontFamily = fontFamily,
-            fontSize = (baseSize * 1.1f).sp,
-            lineHeight = (baseSize * 1.1f * 1.35f).sp,
-            fontWeight = headingWeight,
-            fontStyle = baseFontStyle,
-            textAlign = headingAlign,
-            color = inkColor
-        )
-        BlockStyle.CODE_BLOCK -> TextStyle(
-            fontFamily = JetBrainsMonoFontFamily,
-            fontSize = (baseSize * 0.85f).sp,
-            lineHeight = (baseSize * 0.85f * 1.45f).sp,
-            color = inkColor
-        )
-        BlockStyle.BLOCKQUOTE -> TextStyle(
-            fontFamily = fontFamily,
-            fontSize = baseSize.sp,
-            lineHeight = (baseSize * prefs.lineHeightMultiplier).sp,
-            letterSpacing = prefs.letterSpacingEm.em,
-            fontWeight = baseWeight,
-            fontStyle = FontStyle.Italic,
-            textAlign = bodyAlign,
-            color = inkColor.copy(alpha = 0.85f)
-        )
-        else -> TextStyle(
-            fontFamily = fontFamily,
-            fontSize = baseSize.sp,
-            lineHeight = (baseSize * prefs.lineHeightMultiplier).sp,
-            letterSpacing = prefs.letterSpacingEm.em,
-            fontWeight = baseWeight,
-            fontStyle = baseFontStyle,
-            textIndent = if (prefs.firstLineIndentDp > 0.5f) TextIndent(firstLine = prefs.firstLineIndentDp.sp) else TextIndent.None,
-            hyphens = if (prefs.autoHyphenation) Hyphens.Auto else Hyphens.None,
-            color = inkColor,
-            textAlign = bodyAlign
-        )
-    }
+    val textStyle = resolveBlockTextStyle(
+        style = style,
+        prefs = prefs,
+        fontFamily = fontFamily,
+        inkColor = inkColor,
+        omitFirstLineIndent = omitFirstLineIndent
+    )
 
     val containerModifier = when (style) {
         BlockStyle.BLOCKQUOTE -> Modifier
@@ -1446,13 +1731,6 @@ private fun ReflowableBlockView(
             modifier = Modifier.fillMaxWidth()
         )
     }
-}
-
-private fun ReaderTextAlignment.toComposeTextAlign(): TextAlign = when (this) {
-    ReaderTextAlignment.START -> TextAlign.Start
-    ReaderTextAlignment.JUSTIFY -> TextAlign.Justify
-    ReaderTextAlignment.CENTER -> TextAlign.Center
-    ReaderTextAlignment.END -> TextAlign.End
 }
 
 @Composable

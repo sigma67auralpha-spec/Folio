@@ -189,11 +189,86 @@ class LibraryRepository(
         return ImportResult(added, duplicates, unsupported)
     }
 
+    suspend fun importOrFindBookUri(uri: Uri): Result<Long> = withContext(Dispatchers.IO) {
+        runCatching {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            val rawName = queryFileName(uri)
+            val mimeType = context.contentResolver.getType(uri)
+            val resolvedFormat = rawName?.let { BookFormat.fromFileName(it) }
+                ?: BookFormat.fromMimeType(mimeType)
+                ?: error("Unsupported file format.")
+
+            val fileName = rawName?.takeIf { BookFormat.fromFileName(it) != null }
+                ?: "${rawName?.substringBeforeLast('.')?.ifBlank { "book" } ?: "book_${System.currentTimeMillis()}"}.${resolvedFormat.extensions.first()}"
+
+            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                ?.takeIf { it.isNotEmpty() }
+                ?: error("Could not read file contents.")
+
+            val hash = sha256(bytes)
+            val existing = dao.findBookByHash(hash)
+            if (existing != null) {
+                if (existing.isMissingFile || existing.localCopyPath.isNullOrBlank() || !File(existing.localCopyPath).exists()) {
+                    val safeName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+                    val localFile = File(booksDir, "${hash.take(16)}_$safeName")
+                    localFile.writeBytes(bytes)
+                    dao.updateBook(existing.copy(fileUri = uri.toString(), localCopyPath = localFile.absolutePath, isMissingFile = false))
+                }
+                return@runCatching existing.id
+            }
+
+            val safeName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+            val localFile = File(booksDir, "${hash.take(16)}_$safeName")
+            localFile.writeBytes(bytes)
+
+            val fallbackTitle = fileName.substringBeforeLast('.').replace('_', ' ').replace('-', ' ').trim()
+                .ifBlank { "Untitled Book" }
+            val parsed = BookParser.parseMetadataAndCover(context, localFile, resolvedFormat, fallbackTitle)
+
+            var coverPath: String? = null
+            parsed.coverBytes?.let { cBytes ->
+                if (cBytes.isNotEmpty()) {
+                    val coverFile = File(coversDir, "${hash.take(16)}.jpg")
+                    coverFile.writeBytes(cBytes)
+                    coverPath = coverFile.absolutePath
+                }
+            }
+
+            val newId = dao.insertBook(
+                BookEntity(
+                    title = parsed.title,
+                    author = parsed.author,
+                    series = parsed.series,
+                    seriesIndex = parsed.seriesIndex,
+                    description = parsed.description,
+                    format = resolvedFormat,
+                    fileUri = uri.toString(),
+                    localCopyPath = localFile.absolutePath,
+                    coverPath = coverPath,
+                    fileHash = hash,
+                    fileSizeBytes = localFile.length(),
+                    totalUnits = parsed.totalUnits
+                )
+            )
+            FolioWidgetUpdater.requestUpdate(context)
+            newId
+        }
+    }
+
     private enum class SingleImportStatus { ADDED, DUPLICATE, UNSUPPORTED }
 
     private suspend fun importSingleUri(uri: Uri, explicitName: String? = null): SingleImportStatus {
-        val fileName = explicitName ?: queryFileName(uri) ?: "book_${System.currentTimeMillis()}"
-        val format = BookFormat.fromFileName(fileName) ?: return SingleImportStatus.UNSUPPORTED
+        val rawName = explicitName ?: queryFileName(uri) ?: "book_${System.currentTimeMillis()}"
+        val format = BookFormat.fromFileName(rawName)
+            ?: BookFormat.fromMimeType(context.contentResolver.getType(uri))
+            ?: return SingleImportStatus.UNSUPPORTED
+        val fileName = if (BookFormat.fromFileName(rawName) != null) rawName
+        else "${rawName.substringBeforeLast('.')}.${format.extensions.first()}"
 
         val bytes = runCatching {
             context.contentResolver.openInputStream(uri)?.use { it.readBytes() }

@@ -1,6 +1,7 @@
 package com.example
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -70,7 +71,8 @@ import com.example.widget.FolioWidgetUpdater
 data class WidgetNavRequest(
     val seq: Long,
     val tabRoute: String? = null,
-    val bookId: Long? = null
+    val bookId: Long? = null,
+    val externalUri: Uri? = null
 )
 
 class MainActivity : ComponentActivity() {
@@ -80,7 +82,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        consumeWidgetIntent(intent)
+        consumeIncomingIntent(intent)
         setContent {
             FolioAppRoot(widgetNavRequest = widgetNavState)
         }
@@ -89,10 +91,10 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        consumeWidgetIntent(intent)
+        consumeIncomingIntent(intent)
     }
 
-    private fun consumeWidgetIntent(intent: Intent?) {
+    private fun consumeIncomingIntent(intent: Intent?) {
         intent ?: return
         val tab = intent.getStringExtra(FolioWidgetUpdater.EXTRA_OPEN_TAB)
         val bookId = intent.getLongExtra(FolioWidgetUpdater.EXTRA_OPEN_BOOK_ID, -1L)
@@ -102,6 +104,13 @@ class MainActivity : ComponentActivity() {
         } else if (bookId > 0L) {
             widgetNavState = WidgetNavRequest(seq = ++navSeq, bookId = bookId)
             intent.removeExtra(FolioWidgetUpdater.EXTRA_OPEN_BOOK_ID)
+        } else if (intent.action == Intent.ACTION_VIEW) {
+            val uri = intent.data ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
+            if (uri != null) {
+                widgetNavState = WidgetNavRequest(seq = ++navSeq, externalUri = uri)
+                intent.data = null
+                intent.clipData = null
+            }
         }
     }
 }
@@ -135,6 +144,13 @@ fun FolioAppRoot(
         LaunchedEffect(widgetNavRequest?.seq) {
             val req = widgetNavRequest ?: return@LaunchedEffect
             when {
+                req.externalUri != null -> {
+                    libraryViewModel.openExternalBookUri(req.externalUri) { openedBookId ->
+                        navController.navigate("reader/$openedBookId") {
+                            launchSingleTop = true
+                        }
+                    }
+                }
                 req.bookId != null -> {
                     navController.navigate("reader/${req.bookId}") {
                         launchSingleTop = true
@@ -288,6 +304,7 @@ fun FolioAppRoot(
                                 onSelectFilter = { libraryViewModel.setFilter(it) },
                                 onClearTagFilter = { libraryViewModel.setTagFilter(null) },
                                 onToggleViewMode = { libraryViewModel.toggleViewMode() },
+                                onToggleGroupSeries = { libraryViewModel.toggleGroupSeries() },
                                 onSelectSortOrder = { libraryViewModel.setSortOrder(it) },
                                 onEditMetadata = { editingBook = it },
                                 onAssignShelves = { shelvingBook = it },

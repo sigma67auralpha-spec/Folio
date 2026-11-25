@@ -1,8 +1,8 @@
 App: Folio
-Version Name: 1.1
-Version Code: 2
+Version Name: 1.2
+Version Code: 3
 Package / Application ID: com.aistudio.folioreader.kxmpzq
 Min SDK: 24
 Target SDK: 36
-APK File: Folio-v1.1.apk
+APK File: Folio-v1.2.apk
 Build Variant: debug (signed with debugConfig)

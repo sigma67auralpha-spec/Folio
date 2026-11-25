@@ -195,6 +195,13 @@ fun SettingsScreen(
                 )
                 Spacer(Modifier.height(8.dp))
                 FeatureToggleRow(
+                    title = "Series Stacks in Library",
+                    subtitle = "Group multi-book series into a single stack sorted by book number",
+                    checked = prefs.groupSeriesInLibrary,
+                    testTag = "toggle_series_stacks_switch",
+                    onCheckedChange = { v -> onUpdatePrefs { it.copy(groupSeriesInLibrary = v) } }
+                )
+                FeatureToggleRow(
                     title = "Continue Reading Card",
                     subtitle = "Show the featured resume banner at the top of Library",
                     checked = prefs.showContinueReading,

@@ -30,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.automirrored.outlined.Sort
 import androidx.compose.material.icons.automirrored.outlined.ViewList
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.CreateNewFolder
@@ -38,6 +39,7 @@ import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.FileDownload
 import androidx.compose.material.icons.outlined.FolderCopy
 import androidx.compose.material.icons.outlined.GridView
+import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Refresh
@@ -76,11 +78,79 @@ import com.example.data.model.BookEntity
 import com.example.data.model.BookWithRelations
 import com.example.data.model.LibrarySortOrder
 import com.example.data.model.LibraryViewMode
+import com.example.data.model.ReadStatus
 import com.example.ui.components.BookCover
 import com.example.ui.components.formatBadgeColors
 import com.example.ui.viewmodel.LibraryFilterChip
 import com.example.ui.viewmodel.LibraryUiState
 import kotlin.math.roundToInt
+
+sealed interface LibraryDisplayEntry {
+    val key: String
+
+    data class SingleBook(val item: BookWithRelations) : LibraryDisplayEntry {
+        override val key: String = "book_${item.book.id}"
+    }
+
+    data class SeriesStack(
+        val seriesName: String,
+        val books: List<BookWithRelations>
+    ) : LibraryDisplayEntry {
+        override val key: String = "series_${seriesName.lowercase()}"
+        val completedCount: Int get() = books.count { it.book.readStatus == ReadStatus.FINISHED }
+        val averageProgress: Float
+            get() = if (books.isEmpty()) 0f else books.map { it.book.progressPercent.coerceIn(0f, 100f) }.average().toFloat()
+        val leadBook: BookWithRelations
+            get() = books.firstOrNull { it.book.readStatus == ReadStatus.READING }
+                ?: books.firstOrNull { it.book.readStatus != ReadStatus.FINISHED }
+                ?: books.first()
+    }
+}
+
+internal fun buildLibraryDisplayEntries(
+    books: List<BookWithRelations>,
+    groupSeries: Boolean
+): List<LibraryDisplayEntry> {
+    if (!groupSeries) return books.map { LibraryDisplayEntry.SingleBook(it) }
+
+    val seriesBuckets = linkedMapOf<String, MutableList<BookWithRelations>>()
+    val displayNames = hashMapOf<String, String>()
+    for (item in books) {
+        val raw = item.book.series.trim()
+        if (raw.isNotEmpty()) {
+            val norm = raw.lowercase()
+            displayNames.putIfAbsent(norm, raw)
+            seriesBuckets.getOrPut(norm) { mutableListOf() }.add(item)
+        }
+    }
+
+    val emittedSeries = hashSetOf<String>()
+    val entries = mutableListOf<LibraryDisplayEntry>()
+    for (item in books) {
+        val raw = item.book.series.trim()
+        val norm = raw.lowercase()
+        val bucket = if (raw.isNotEmpty()) seriesBuckets[norm] else null
+        if (bucket != null && bucket.size >= 2) {
+            if (emittedSeries.add(norm)) {
+                val sortedVolumes = bucket.sortedWith(
+                    compareBy<BookWithRelations>(
+                        { if (it.book.seriesIndex > 0f) it.book.seriesIndex else Float.MAX_VALUE },
+                        { it.book.title.lowercase() }
+                    )
+                )
+                entries.add(
+                    LibraryDisplayEntry.SeriesStack(
+                        seriesName = displayNames[norm] ?: raw,
+                        books = sortedVolumes
+                    )
+                )
+            }
+        } else {
+            entries.add(LibraryDisplayEntry.SingleBook(item))
+        }
+    }
+    return entries
+}
 
 @Composable
 fun LibraryScreen(
@@ -92,6 +162,7 @@ fun LibraryScreen(
     onSelectFilter: (LibraryFilterChip) -> Unit,
     onClearTagFilter: () -> Unit,
     onToggleViewMode: () -> Unit,
+    onToggleGroupSeries: () -> Unit,
     onSelectSortOrder: (LibrarySortOrder) -> Unit,
     onEditMetadata: (BookWithRelations) -> Unit,
     onAssignShelves: (BookWithRelations) -> Unit,
@@ -102,6 +173,25 @@ fun LibraryScreen(
 ) {
     var sortMenuExpanded by remember { mutableStateOf(false) }
     var contextMenuBook by remember { mutableStateOf<BookWithRelations?>(null) }
+    var activeSeriesName by remember { mutableStateOf<String?>(null) }
+
+    val displayEntries = remember(
+        state.filteredBooks,
+        state.preferences.groupSeriesInLibrary,
+        state.searchQuery
+    ) {
+        buildLibraryDisplayEntries(
+            books = state.filteredBooks,
+            groupSeries = state.preferences.groupSeriesInLibrary && state.searchQuery.isBlank()
+        )
+    }
+
+    val activeSeriesStack = remember(activeSeriesName, displayEntries) {
+        activeSeriesName?.let { name ->
+            displayEntries.filterIsInstance<LibraryDisplayEntry.SeriesStack>()
+                .firstOrNull { it.seriesName.equals(name, ignoreCase = true) }
+        }
+    }
 
     Box(modifier = modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -135,6 +225,18 @@ fun LibraryScreen(
                     }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = onToggleGroupSeries,
+                        modifier = Modifier.testTag("toggle_series_stacks_button")
+                    ) {
+                        Icon(
+                            imageVector = if (state.preferences.groupSeriesInLibrary)
+                                Icons.Filled.Layers else Icons.Outlined.Layers,
+                            tint = if (state.preferences.groupSeriesInLibrary)
+                                MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            contentDescription = "Toggle series stacks"
+                        )
+                    }
                     IconButton(
                         onClick = onToggleViewMode,
                         modifier = Modifier.testTag("toggle_view_mode_button")
@@ -254,14 +356,25 @@ fun LibraryScreen(
                             )
                         }
                     }
-                    items(state.filteredBooks, key = { it.book.id }) { item ->
-                        BookGridCard(
-                            item = item,
-                            showFormatBadge = state.preferences.showFormatBadges,
-                            showProgressBar = state.preferences.showProgressBars,
-                            onOpen = { onOpenBook(item.book.id) },
-                            onOpenMenu = { contextMenuBook = item }
-                        )
+                    items(displayEntries, key = { it.key }) { entry ->
+                        when (entry) {
+                            is LibraryDisplayEntry.SingleBook -> {
+                                BookGridCard(
+                                    item = entry.item,
+                                    showFormatBadge = state.preferences.showFormatBadges,
+                                    showProgressBar = state.preferences.showProgressBars,
+                                    onOpen = { onOpenBook(entry.item.book.id) },
+                                    onOpenMenu = { contextMenuBook = entry.item }
+                                )
+                            }
+                            is LibraryDisplayEntry.SeriesStack -> {
+                                SeriesStackGridCard(
+                                    stack = entry,
+                                    showProgressBar = state.preferences.showProgressBars,
+                                    onOpenStack = { activeSeriesName = entry.seriesName }
+                                )
+                            }
+                        }
                     }
                 }
             } else {
@@ -280,14 +393,25 @@ fun LibraryScreen(
                             )
                         }
                     }
-                    items(state.filteredBooks, key = { it.book.id }) { item ->
-                        BookListRow(
-                            item = item,
-                            showFormatBadge = state.preferences.showFormatBadges,
-                            showProgressBar = state.preferences.showProgressBars,
-                            onOpen = { onOpenBook(item.book.id) },
-                            onOpenMenu = { contextMenuBook = item }
-                        )
+                    items(displayEntries, key = { it.key }) { entry ->
+                        when (entry) {
+                            is LibraryDisplayEntry.SingleBook -> {
+                                BookListRow(
+                                    item = entry.item,
+                                    showFormatBadge = state.preferences.showFormatBadges,
+                                    showProgressBar = state.preferences.showProgressBars,
+                                    onOpen = { onOpenBook(entry.item.book.id) },
+                                    onOpenMenu = { contextMenuBook = entry.item }
+                                )
+                            }
+                            is LibraryDisplayEntry.SeriesStack -> {
+                                SeriesStackListRow(
+                                    stack = entry,
+                                    showProgressBar = state.preferences.showProgressBars,
+                                    onOpenStack = { activeSeriesName = entry.seriesName }
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -306,12 +430,27 @@ fun LibraryScreen(
         )
     }
 
+    activeSeriesStack?.let { stack ->
+        SeriesBooksBottomSheet(
+            stack = stack,
+            showProgressBar = state.preferences.showProgressBars,
+            showFormatBadge = state.preferences.showFormatBadges,
+            onDismiss = { activeSeriesName = null },
+            onOpenBook = { bookId ->
+                activeSeriesName = null
+                onOpenBook(bookId)
+            },
+            onOpenMenu = { bookItem -> contextMenuBook = bookItem }
+        )
+    }
+
     contextMenuBook?.let { item ->
         BookActionsBottomSheet(
             item = item,
             onDismiss = { contextMenuBook = null },
             onOpen = {
                 contextMenuBook = null
+                activeSeriesName = null
                 onOpenBook(item.book.id)
             },
             onEditMetadata = {
@@ -537,6 +676,299 @@ private fun BookListRow(
             }
         }
     }
+}
+
+@Composable
+private fun SeriesStackGridCard(
+    stack: LibraryDisplayEntry.SeriesStack,
+    showProgressBar: Boolean,
+    onOpenStack: () -> Unit
+) {
+    val lead = stack.leadBook.book
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onOpenStack)
+            .testTag("series_stack_card_${stack.seriesName}")
+    ) {
+        Box(modifier = Modifier.fillMaxWidth().padding(top = 6.dp, end = 6.dp)) {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f),
+                tonalElevation = 1.dp,
+                modifier = Modifier
+                    .matchParentSize()
+                    .padding(start = 10.dp, bottom = 10.dp)
+            ) {}
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f),
+                tonalElevation = 2.dp,
+                modifier = Modifier
+                    .matchParentSize()
+                    .padding(start = 5.dp, top = 3.dp, end = 5.dp, bottom = 5.dp)
+            ) {}
+            Box(modifier = Modifier.padding(top = 6.dp, end = 6.dp)) {
+                BookCover(
+                    book = lead,
+                    showFormatBadge = false,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.secondary,
+                    contentColor = MaterialTheme.colorScheme.onSecondary,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Layers,
+                            contentDescription = null,
+                            modifier = Modifier.size(12.dp)
+                        )
+                        Text(
+                            text = "${stack.books.size}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = stack.seriesName,
+            style = MaterialTheme.typography.titleSmall,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            text = "${stack.books.size} books • ${stack.completedCount} finished",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.secondary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        if (showProgressBar && stack.averageProgress > 0.5f) {
+            Spacer(Modifier.height(4.dp))
+            LinearProgressIndicator(
+                progress = { (stack.averageProgress / 100f).coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp))
+            )
+        }
+    }
+}
+
+@Composable
+private fun SeriesStackListRow(
+    stack: LibraryDisplayEntry.SeriesStack,
+    showProgressBar: Boolean,
+    onOpenStack: () -> Unit
+) {
+    val lead = stack.leadBook.book
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        tonalElevation = 2.dp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpenStack)
+            .testTag("series_stack_row_${stack.seriesName}")
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(modifier = Modifier.width(58.dp)) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f),
+                    modifier = Modifier
+                        .matchParentSize()
+                        .padding(start = 5.dp, bottom = 5.dp)
+                ) {}
+                BookCover(
+                    book = lead,
+                    showFormatBadge = false,
+                    modifier = Modifier.width(54.dp).padding(top = 4.dp)
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = stack.seriesName,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    Surface(
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                        shape = RoundedCornerShape(6.dp)
+                    ) {
+                        Text(
+                            text = "${stack.books.size} books",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+                Text(
+                    text = "Next: ${lead.title}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (showProgressBar) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = "${stack.completedCount}/${stack.books.size} finished • ${stack.averageProgress.roundToInt()}% overall",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                }
+            }
+            Icon(
+                Icons.Filled.Layers,
+                contentDescription = "Open series stack",
+                tint = MaterialTheme.colorScheme.secondary
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SeriesBooksBottomSheet(
+    stack: LibraryDisplayEntry.SeriesStack,
+    showProgressBar: Boolean,
+    showFormatBadge: Boolean,
+    onDismiss: () -> Unit,
+    onOpenBook: (Long) -> Unit,
+    onOpenMenu: (BookWithRelations) -> Unit
+) {
+    val lead = stack.leadBook.book
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stack.seriesName,
+                        style = MaterialTheme.typography.headlineSmall,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "${stack.books.size} books • ${stack.completedCount} finished",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Button(
+                    onClick = { onOpenBook(lead.id) },
+                    modifier = Modifier.heightIn(min = 44.dp).testTag("series_continue_button")
+                ) {
+                    val numLabel = if (lead.seriesIndex > 0f) " #${formatSeriesIndex(lead.seriesIndex)}" else ""
+                    Text(if (lead.readStatus == ReadStatus.READING) "Continue$numLabel" else "Read$numLabel")
+                }
+            }
+            HorizontalDivider()
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 400.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(stack.books, key = { it.book.id }) { item ->
+                    val b = item.book
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        tonalElevation = 1.dp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpenBook(b.id) }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            BookCover(book = b, showFormatBadge = showFormatBadge, modifier = Modifier.width(46.dp))
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    if (b.seriesIndex > 0f) {
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = MaterialTheme.colorScheme.secondaryContainer
+                                        ) {
+                                            Text(
+                                                text = "#${formatSeriesIndex(b.seriesIndex)}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+                                    Text(
+                                        text = b.title,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    text = "${b.author} • ${b.readStatus.label}" +
+                                        if (showProgressBar && b.progressPercent > 0.5f) " (${b.progressPercent.roundToInt()}%)" else "",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                if (showProgressBar && b.progressPercent > 0.5f) {
+                                    Spacer(Modifier.height(4.dp))
+                                    LinearProgressIndicator(
+                                        progress = { (b.progressPercent / 100f).coerceIn(0f, 1f) },
+                                        modifier = Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp))
+                                    )
+                                }
+                            }
+                            IconButton(onClick = { onOpenMenu(item) }) {
+                                Icon(Icons.Outlined.MoreVert, contentDescription = "Book actions")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun formatSeriesIndex(idx: Float): String {
+    val whole = idx.toInt()
+    return if (idx == whole.toFloat()) whole.toString() else idx.toString()
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

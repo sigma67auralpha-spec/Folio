@@ -328,5 +328,90 @@ class ExampleUnitTest {
         assertFalse(prefs.textJustified)
         val justified = prefs.copy(textAlignment = com.example.data.model.ReaderTextAlignment.JUSTIFY)
         assertTrue(justified.textJustified)
+        assertEquals(com.example.data.model.ReaderReadingMode.SCROLL, prefs.readingMode)
+        assertTrue(prefs.groupSeriesInLibrary)
+    }
+
+    @Test
+    fun mimeTypeDetectionCoversBookFormatsAndRejectsUnknown() {
+        assertEquals(BookFormat.EPUB, BookFormat.fromMimeType("application/epub+zip"))
+        assertEquals(BookFormat.PDF, BookFormat.fromMimeType("application/pdf; charset=utf-8"))
+        assertEquals(BookFormat.CBZ, BookFormat.fromMimeType("application/vnd.comicbook+zip"))
+        assertEquals(BookFormat.CBR, BookFormat.fromMimeType("application/x-cbr"))
+        assertEquals(BookFormat.AZW3, BookFormat.fromMimeType("application/vnd.amazon.mobi8-ebook"))
+        assertEquals(BookFormat.FB2, BookFormat.fromMimeType("application/x-fictionbook+xml"))
+        assertEquals(BookFormat.DOCX, BookFormat.fromMimeType("application/vnd.openxmlformats-officedocument.wordprocessingml.document"))
+        assertEquals(BookFormat.TXT, BookFormat.fromMimeType("text/plain; charset=UTF-8"))
+        assertNull(BookFormat.fromMimeType("image/png"))
+        assertNull(BookFormat.fromMimeType(null))
+    }
+
+    @Test
+    fun librarySeriesStacksGroupMultiBookSeriesAndSortByVolumeIndex() {
+        fun wrap(b: com.example.data.model.BookEntity) = com.example.data.model.BookWithRelations(
+            book = b,
+            shelves = emptyList(),
+            tags = emptyList(),
+            highlights = emptyList()
+        )
+        val b1 = wrap(
+            com.example.data.model.BookEntity(
+                id = 1, title = "Golden Son", series = "Red Rising", seriesIndex = 2f,
+                format = BookFormat.EPUB, fileUri = "file:///2", fileHash = "h2"
+            )
+        )
+        val b2 = wrap(
+            com.example.data.model.BookEntity(
+                id = 2, title = "Red Rising", series = "Red Rising", seriesIndex = 1f,
+                format = BookFormat.EPUB, fileUri = "file:///1", fileHash = "h1"
+            )
+        )
+        val bSoloSeries = wrap(
+            com.example.data.model.BookEntity(
+                id = 3, title = "Dune", series = "Dune", seriesIndex = 1f,
+                format = BookFormat.EPUB, fileUri = "file:///3", fileHash = "h3"
+            )
+        )
+        val bStandalone = wrap(
+            com.example.data.model.BookEntity(
+                id = 4, title = "Piranesi", series = "", seriesIndex = 0f,
+                format = BookFormat.EPUB, fileUri = "file:///4", fileHash = "h4"
+            )
+        )
+
+        val stacked = com.example.ui.screens.buildLibraryDisplayEntries(listOf(b1, b2, bSoloSeries, bStandalone), groupSeries = true)
+        assertEquals(3, stacked.size)
+        val first = stacked[0] as com.example.ui.screens.LibraryDisplayEntry.SeriesStack
+        assertEquals("Red Rising", first.seriesName)
+        assertEquals(listOf("Red Rising", "Golden Son"), first.books.map { it.book.title })
+        assertTrue(stacked[1] is com.example.ui.screens.LibraryDisplayEntry.SingleBook)
+        assertTrue(stacked[2] is com.example.ui.screens.LibraryDisplayEntry.SingleBook)
+
+        val flattened = com.example.ui.screens.buildLibraryDisplayEntries(listOf(b1, b2, bSoloSeries, bStandalone), groupSeries = false)
+        assertEquals(4, flattened.size)
+        assertTrue(flattened.all { it is com.example.ui.screens.LibraryDisplayEntry.SingleBook })
+    }
+
+    @Test
+    fun findPageForParagraphLocatesExactSliceOrNearestPage() {
+        val dummyBlock = com.example.engine.ParagraphBlock("Text")
+        val pages = listOf(
+            com.example.ui.screens.ChapterPage(
+                pageIndex = 0,
+                slices = listOf(com.example.ui.screens.PageSlice.TextSlice(0, dummyBlock, 0, 4, false)),
+                firstParagraphIndex = 0,
+                lastParagraphIndex = 2
+            ),
+            com.example.ui.screens.ChapterPage(
+                pageIndex = 1,
+                slices = listOf(com.example.ui.screens.PageSlice.TextSlice(5, dummyBlock, 0, 4, false)),
+                firstParagraphIndex = 5,
+                lastParagraphIndex = 8
+            )
+        )
+        assertEquals(0, com.example.ui.screens.findPageForParagraph(pages, 0))
+        assertEquals(1, com.example.ui.screens.findPageForParagraph(pages, 5))
+        assertEquals(1, com.example.ui.screens.findPageForParagraph(pages, 6))
+        assertEquals(1, com.example.ui.screens.findPageForParagraph(pages, 99))
     }
 }

@@ -70,6 +70,11 @@ enum class TapZonePreset(val label: String, val description: String) {
     SCROLL_ONLY("Scroll Only", "Disable page-jump taps; center tap toggles menu")
 }
 
+enum class ReaderReadingMode(val label: String) {
+    SCROLL("Vertical Scroll"),
+    PAGED("Page-by-Page")
+}
+
 enum class PageAnimation(val label: String) {
     NONE("Instant"),
     SLIDE("Slide"),
@@ -165,6 +170,7 @@ data class ReaderPreferences(
     // Eye comfort & screen
     val warmthTint: Float = 0f,
     val tapZonePreset: TapZonePreset = TapZonePreset.CLASSIC_LR,
+    val readingMode: ReaderReadingMode = ReaderReadingMode.SCROLL,
     val horizontalGestureMode: HorizontalGestureMode = HorizontalGestureMode.NORMAL,
     val volumeKeyPaging: Boolean = true,
     val swipeBrightness: Boolean = true,
@@ -191,6 +197,7 @@ data class ReaderPreferences(
     val appDarkTheme: Boolean? = null,
     val appAccent: AppAccent = AppAccent.TERRACOTTA,
     val libraryDensity: LibraryDensity = LibraryDensity.COMFORTABLE,
+    val groupSeriesInLibrary: Boolean = true,
     val comicRtl: Boolean = false,
     val comicDoubleSpread: Boolean = false,
     val pdfMarginCrop: Boolean = false,
