@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.graphics.BitmapFactory
+import android.util.LruCache
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -27,6 +28,8 @@ import com.example.engine.TextRun
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import java.io.File
 import kotlin.math.roundToInt
+
+private val imageBoundsCache = LruCache<String, Pair<Int, Int>>(64)
 
 sealed interface PageSlice {
     val paragraphIndex: Int
@@ -285,10 +288,20 @@ internal fun paginateChapterBlocks(
 
     fun estimateImageHeightPx(imagePath: String): Int {
         val targetWidth = (contentWidthPx * prefs.imageWidthPercent.coerceIn(0.35f, 1.0f)).roundToInt()
-        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        runCatching { BitmapFactory.decodeFile(imagePath, opts) }
-        return if (opts.outWidth > 0 && opts.outHeight > 0) {
-            val scaled = ((opts.outHeight.toFloat() / opts.outWidth.toFloat()) * targetWidth).roundToInt()
+        val cachedBounds = imageBoundsCache.get(imagePath)
+        val (outW, outH) = if (cachedBounds != null) {
+            cachedBounds
+        } else {
+            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            runCatching { BitmapFactory.decodeFile(imagePath, opts) }
+            if (opts.outWidth > 0 && opts.outHeight > 0) {
+                (opts.outWidth to opts.outHeight).also { imageBoundsCache.put(imagePath, it) }
+            } else {
+                0 to 0
+            }
+        }
+        return if (outW > 0 && outH > 0) {
+            val scaled = ((outH.toFloat() / outW.toFloat()) * targetWidth).roundToInt()
             scaled.coerceIn(80, imageMaxHeightPx)
         } else {
             imageMaxHeightPx.coerceAtMost(contentHeightPx / 2)
@@ -391,10 +404,10 @@ internal fun paginateChapterBlocks(
                         val sliceGap = if (currentSlices.isNotEmpty()) paragraphSpacingPx else 0
                         val availHeight = (contentHeightPx - usedHeight - sliceGap - extraVPad).coerceAtLeast(1)
                         val isCont = charStart > 0
-                        val sliceAnnotated = if (charStart == 0) {
-                            initialAnnotated
+                        val layout = if (charStart == 0) {
+                            fullLayout
                         } else {
-                            buildSliceAnnotatedString(
+                            val sliceAnnotated = buildSliceAnnotatedString(
                                 fullText = block.text,
                                 style = block.style,
                                 runs = block.runs,
@@ -405,19 +418,19 @@ internal fun paginateChapterBlocks(
                                 startChar = charStart,
                                 endChar = block.text.length
                             )
+                            val sliceStyle = resolveBlockTextStyle(
+                                style = block.style,
+                                prefs = prefs,
+                                fontFamily = fontFamily,
+                                inkColor = inkColor,
+                                omitFirstLineIndent = isCont
+                            )
+                            textMeasurer.measure(
+                                text = sliceAnnotated,
+                                style = sliceStyle,
+                                constraints = Constraints(maxWidth = innerWidth)
+                            )
                         }
-                        val sliceStyle = resolveBlockTextStyle(
-                            style = block.style,
-                            prefs = prefs,
-                            fontFamily = fontFamily,
-                            inkColor = inkColor,
-                            omitFirstLineIndent = isCont
-                        )
-                        val layout = textMeasurer.measure(
-                            text = sliceAnnotated,
-                            style = sliceStyle,
-                            constraints = Constraints(maxWidth = innerWidth)
-                        )
                         val minFirstLine = if (layout.lineCount > 0) layout.getLineBottom(0).roundToInt() else 1
                         if (currentSlices.isNotEmpty() && minFirstLine > availHeight) {
                             flushPage()

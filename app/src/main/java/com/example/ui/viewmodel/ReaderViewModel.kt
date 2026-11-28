@@ -116,6 +116,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
     private var sessionTimerJob: Job? = null
     private var collectorJobs = mutableListOf<Job>()
     private var prefetchJob: Job? = null
+    private var searchJob: Job? = null
     private var lastLoadedPdfOptions: Triple<Int, Boolean, Boolean>? = null
     private val pageBitmapCache = object : LruCache<String, Bitmap>(6) {}
 
@@ -125,7 +126,11 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         collectorJobs.clear()
         prefetchJob?.cancel()
         prefetchJob = null
+        searchJob?.cancel()
+        searchJob = null
         pageBitmapCache.evictAll()
+        PdfPageHelper.closeCachedRenderer()
+        ComicArchiveHelper.closeCachedArchives()
         lastLoadedPdfOptions = null
         sessionTimerJob?.cancel()
         sessionTimerJob = null
@@ -438,7 +443,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
             is ReaderContentState.FixedPage -> st.pageCount
             else -> 1
         }
-        viewModelScope.launch {
+        viewModelScope.launch(NonCancellable) {
             repository.saveProgress(currentBook.id, _currentUnit.value, total, scrollFraction)
         }
     }
@@ -507,15 +512,18 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun searchInBook(query: String) {
+        searchJob?.cancel()
         val st = _contentState.value as? ReaderContentState.Reflowable ?: return
         val q = query.trim()
         if (q.length < 2) {
             _searchResults.value = emptyList()
             return
         }
-        viewModelScope.launch(Dispatchers.Default) {
+        searchJob = viewModelScope.launch(Dispatchers.Default) {
+            delay(120L)
             val matches = mutableListOf<SearchMatch>()
             for (chapter in st.chapters) {
+                if (!isActive) return@launch
                 chapter.blocks.forEachIndexed { pIdx, block ->
                     val hitIdx = block.text.indexOf(q, ignoreCase = true)
                     if (hitIdx >= 0) {
@@ -532,14 +540,20 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                             )
                         )
                     }
-                    if (matches.size >= 40) return@launch.also { _searchResults.value = matches }
+                    if (matches.size >= 40) {
+                        _searchResults.value = matches
+                        return@launch
+                    }
                 }
             }
             _searchResults.value = matches
         }
     }
 
-    fun clearSearch() { _searchResults.value = emptyList() }
+    fun clearSearch() {
+        searchJob?.cancel()
+        _searchResults.value = emptyList()
+    }
     fun clearToast() { _toastMessage.value = null }
 
     fun toggleTts(startParagraphIndex: Int = 0) {
@@ -582,7 +596,10 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         isReaderForegroundActive = false
         sessionTimerJob?.cancel()
         prefetchJob?.cancel()
+        searchJob?.cancel()
         pageBitmapCache.evictAll()
+        PdfPageHelper.closeCachedRenderer()
+        ComicArchiveHelper.closeCachedArchives()
         ttsManager.release()
         super.onCleared()
     }

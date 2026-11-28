@@ -189,6 +189,48 @@ class LibraryRepository(
         return ImportResult(added, duplicates, unsupported)
     }
 
+    private data class StreamedImportFile(
+        val tempFile: File,
+        val hash: String,
+        val byteCount: Long
+    )
+
+    private fun streamUriToTempFileAndHash(uri: Uri): StreamedImportFile? {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val tmp = File(booksDir, "import_tmp_${System.nanoTime()}.part")
+        var totalBytes = 0L
+        val ok = runCatching {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                tmp.outputStream().buffered(32 * 1024).use { output ->
+                    val buffer = ByteArray(32 * 1024)
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read <= 0) break
+                        digest.update(buffer, 0, read)
+                        output.write(buffer, 0, read)
+                        totalBytes += read
+                    }
+                }
+            } ?: return@runCatching false
+            totalBytes > 0L
+        }.getOrDefault(false)
+        if (!ok) {
+            runCatching { tmp.delete() }
+            return null
+        }
+        val hash = digest.digest().joinToString("") { "%02x".format(it) }
+        return StreamedImportFile(tmp, hash, totalBytes)
+    }
+
+    private fun saveCompressedCover(fileHash: String, rawCoverBytes: ByteArray?, suffix: String = ""): String? {
+        if (rawCoverBytes == null || rawCoverBytes.isEmpty()) return null
+        val optimized = BookParser.compressCoverThumbnail(rawCoverBytes) ?: rawCoverBytes
+        if (optimized.isEmpty()) return null
+        val coverFile = File(coversDir, "${fileHash.take(16)}$suffix.jpg")
+        coverFile.writeBytes(optimized)
+        return coverFile.absolutePath
+    }
+
     suspend fun importOrFindBookUri(uri: Uri): Result<Long> = withContext(Dispatchers.IO) {
         runCatching {
             runCatching {
@@ -206,38 +248,44 @@ class LibraryRepository(
             val fileName = rawName?.takeIf { BookFormat.fromFileName(it) != null }
                 ?: "${rawName?.substringBeforeLast('.')?.ifBlank { "book" } ?: "book_${System.currentTimeMillis()}"}.${resolvedFormat.extensions.first()}"
 
-            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                ?.takeIf { it.isNotEmpty() }
+            val streamed = streamUriToTempFileAndHash(uri)
                 ?: error("Could not read file contents.")
 
-            val hash = sha256(bytes)
+            val hash = streamed.hash
+            val safeName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+            val localFile = File(booksDir, "${hash.take(16)}_$safeName")
             val existing = dao.findBookByHash(hash)
             if (existing != null) {
                 if (existing.isMissingFile || existing.localCopyPath.isNullOrBlank() || !File(existing.localCopyPath).exists()) {
-                    val safeName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-                    val localFile = File(booksDir, "${hash.take(16)}_$safeName")
-                    localFile.writeBytes(bytes)
+                    if (localFile.exists()) localFile.delete()
+                    if (!streamed.tempFile.renameTo(localFile)) {
+                        streamed.tempFile.copyTo(localFile, overwrite = true)
+                        streamed.tempFile.delete()
+                    }
                     dao.updateBook(existing.copy(fileUri = uri.toString(), localCopyPath = localFile.absolutePath, isMissingFile = false))
+                } else {
+                    streamed.tempFile.delete()
                 }
                 return@runCatching existing.id
             }
 
-            val safeName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-            val localFile = File(booksDir, "${hash.take(16)}_$safeName")
-            localFile.writeBytes(bytes)
+            if (localFile.exists()) localFile.delete()
+            if (!streamed.tempFile.renameTo(localFile)) {
+                streamed.tempFile.copyTo(localFile, overwrite = true)
+                streamed.tempFile.delete()
+            }
 
             val fallbackTitle = fileName.substringBeforeLast('.').replace('_', ' ').replace('-', ' ').trim()
                 .ifBlank { "Untitled Book" }
-            val parsed = BookParser.parseMetadataAndCover(context, localFile, resolvedFormat, fallbackTitle)
-
-            var coverPath: String? = null
-            parsed.coverBytes?.let { cBytes ->
-                if (cBytes.isNotEmpty()) {
-                    val coverFile = File(coversDir, "${hash.take(16)}.jpg")
-                    coverFile.writeBytes(cBytes)
-                    coverPath = coverFile.absolutePath
-                }
-            }
+            val diskCacheFile = File(context.cacheDir, "parsed_books/${hash.take(16)}_v1.bin")
+            val parsed = BookParser.parseMetadataAndCover(
+                context = context,
+                file = localFile,
+                format = resolvedFormat,
+                fallbackTitle = fallbackTitle,
+                diskCacheFile = diskCacheFile
+            )
+            val coverPath = saveCompressedCover(hash, parsed.coverBytes)
 
             val newId = dao.insertBook(
                 BookEntity(
@@ -251,7 +299,7 @@ class LibraryRepository(
                     localCopyPath = localFile.absolutePath,
                     coverPath = coverPath,
                     fileHash = hash,
-                    fileSizeBytes = localFile.length(),
+                    fileSizeBytes = streamed.byteCount,
                     totalUnits = parsed.totalUnits
                 )
             )
@@ -270,39 +318,43 @@ class LibraryRepository(
         val fileName = if (BookFormat.fromFileName(rawName) != null) rawName
         else "${rawName.substringBeforeLast('.')}.${format.extensions.first()}"
 
-        val bytes = runCatching {
-            context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-        }.getOrNull() ?: return SingleImportStatus.UNSUPPORTED
+        val streamed = streamUriToTempFileAndHash(uri) ?: return SingleImportStatus.UNSUPPORTED
+        val hash = streamed.hash
+        val safeName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+        val localFile = File(booksDir, "${hash.take(16)}_$safeName")
 
-        if (bytes.isEmpty()) return SingleImportStatus.UNSUPPORTED
-        val hash = sha256(bytes)
         val existing = dao.findBookByHash(hash)
         if (existing != null) {
             if (existing.isMissingFile) {
-                val safeName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-                val localFile = File(booksDir, "${hash.take(16)}_$safeName")
-                localFile.writeBytes(bytes)
+                if (localFile.exists()) localFile.delete()
+                if (!streamed.tempFile.renameTo(localFile)) {
+                    streamed.tempFile.copyTo(localFile, overwrite = true)
+                    streamed.tempFile.delete()
+                }
                 dao.updateBook(existing.copy(fileUri = uri.toString(), localCopyPath = localFile.absolutePath, isMissingFile = false))
+            } else {
+                streamed.tempFile.delete()
             }
             return SingleImportStatus.DUPLICATE
         }
 
-        val safeName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-        val localFile = File(booksDir, "${hash.take(16)}_$safeName")
-        localFile.writeBytes(bytes)
+        if (localFile.exists()) localFile.delete()
+        if (!streamed.tempFile.renameTo(localFile)) {
+            streamed.tempFile.copyTo(localFile, overwrite = true)
+            streamed.tempFile.delete()
+        }
 
         val fallbackTitle = fileName.substringBeforeLast('.').replace('_', ' ').replace('-', ' ').trim()
             .ifBlank { "Untitled Book" }
-        val parsed = BookParser.parseMetadataAndCover(context, localFile, format, fallbackTitle)
-
-        var coverPath: String? = null
-        parsed.coverBytes?.let { cBytes ->
-            if (cBytes.isNotEmpty()) {
-                val coverFile = File(coversDir, "${hash.take(16)}.jpg")
-                coverFile.writeBytes(cBytes)
-                coverPath = coverFile.absolutePath
-            }
-        }
+        val diskCacheFile = File(context.cacheDir, "parsed_books/${hash.take(16)}_v1.bin")
+        val parsed = BookParser.parseMetadataAndCover(
+            context = context,
+            file = localFile,
+            format = format,
+            fallbackTitle = fallbackTitle,
+            diskCacheFile = diskCacheFile
+        )
+        val coverPath = saveCompressedCover(hash, parsed.coverBytes)
 
         dao.insertBook(
             BookEntity(
@@ -316,7 +368,7 @@ class LibraryRepository(
                 localCopyPath = localFile.absolutePath,
                 coverPath = coverPath,
                 fileHash = hash,
-                fileSizeBytes = localFile.length(),
+                fileSizeBytes = streamed.byteCount,
                 totalUnits = parsed.totalUnits
             )
         )
@@ -331,15 +383,9 @@ class LibraryRepository(
 
     suspend fun reparseBookMetadata(book: BookEntity): Boolean = withContext(Dispatchers.IO) {
         val file = resolveBookFile(book) ?: return@withContext false
-        val parsed = BookParser.parseMetadataAndCover(context, file, book.format, book.title)
-        var coverPath = book.coverPath
-        parsed.coverBytes?.let { cBytes ->
-            if (cBytes.isNotEmpty()) {
-                val coverFile = File(coversDir, "${book.fileHash.take(16)}.jpg")
-                coverFile.writeBytes(cBytes)
-                coverPath = coverFile.absolutePath
-            }
-        }
+        val diskCacheFile = File(context.cacheDir, "parsed_books/${book.fileHash.take(16)}_v1.bin")
+        val parsed = BookParser.parseMetadataAndCover(context, file, book.format, book.title, diskCacheFile = diskCacheFile)
+        val coverPath = saveCompressedCover(book.fileHash, parsed.coverBytes) ?: book.coverPath
         dao.updateBook(
             book.copy(
                 title = parsed.title.ifBlank { book.title },
@@ -400,11 +446,7 @@ class LibraryRepository(
         var coverPath = book.coverPath
         if (newCoverUri != null) {
             val bytes = context.contentResolver.openInputStream(newCoverUri)?.use { it.readBytes() }
-            if (bytes != null && bytes.isNotEmpty()) {
-                val coverFile = File(coversDir, "${book.fileHash.take(16)}_custom_${System.currentTimeMillis()}.jpg")
-                coverFile.writeBytes(bytes)
-                coverPath = coverFile.absolutePath
-            }
+            coverPath = saveCompressedCover(book.fileHash, bytes, suffix = "_custom_${System.currentTimeMillis()}") ?: coverPath
         }
         dao.updateBook(
             book.copy(
@@ -446,6 +488,11 @@ class LibraryRepository(
         if (deleteLocalCopy) {
             book.localCopyPath?.let { runCatching { File(it).delete() } }
             book.coverPath?.let { runCatching { File(it).delete() } }
+        }
+        val hashPrefix = book.fileHash.take(16)
+        if (hashPrefix.isNotBlank()) {
+            runCatching { File(context.cacheDir, "parsed_books/${hashPrefix}_v1.bin").delete() }
+            runCatching { File(context.cacheDir, "epub_images/$hashPrefix").deleteRecursively() }
         }
         dao.deleteBook(book)
         FolioWidgetUpdater.requestUpdate(context)

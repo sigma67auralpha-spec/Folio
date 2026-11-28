@@ -12,28 +12,45 @@ import java.util.zip.ZipFile
 
 object BookParser {
 
-    fun parseMetadataAndCover(context: Context, file: File, format: BookFormat, fallbackTitle: String): ParsedMetadata {
+    fun parseMetadataAndCover(
+        context: Context,
+        file: File,
+        format: BookFormat,
+        fallbackTitle: String,
+        diskCacheFile: File? = null
+    ): ParsedMetadata {
         return when (format) {
             BookFormat.EPUB -> EpubParser.parseMetadataOnly(file, fallbackTitle)
-            BookFormat.MOBI, BookFormat.AZW3 -> when (val res = MobiParser.parse(file, fallbackTitle)) {
-                is ParsedBookContent.Reflowable -> res.metadata
-                is ParsedBookContent.Error -> ParsedMetadata(title = fallbackTitle)
-            }
-            BookFormat.DOCX -> when (val res = DocxRtfFb2Parser.parseDocx(file, fallbackTitle)) {
-                is ParsedBookContent.Reflowable -> res.metadata
-                is ParsedBookContent.Error -> ParsedMetadata(title = fallbackTitle)
-            }
-            BookFormat.FB2 -> when (val res = DocxRtfFb2Parser.parseFb2(file, fallbackTitle)) {
-                is ParsedBookContent.Reflowable -> res.metadata
-                is ParsedBookContent.Error -> ParsedMetadata(title = fallbackTitle)
-            }
-            BookFormat.RTF -> DocxRtfFb2Parser.parseRtf(file.readBytes(), fallbackTitle).metadata
-            BookFormat.TXT -> TextHtmlMdParser.parsePlainText(TextHtmlMdParser.decodeBytes(file.readBytes()), fallbackTitle).metadata
-            BookFormat.HTML -> TextHtmlMdParser.parseHtml(TextHtmlMdParser.decodeBytes(file.readBytes()), fallbackTitle).metadata
-            BookFormat.MARKDOWN -> TextHtmlMdParser.parseMarkdown(TextHtmlMdParser.decodeBytes(file.readBytes()), fallbackTitle).metadata
             BookFormat.PDF -> extractPdfMetadata(file, fallbackTitle)
             BookFormat.CBZ -> extractCbzMetadata(file, fallbackTitle)
             BookFormat.CBR -> extractCbrMetadata(file, fallbackTitle)
+            BookFormat.MOBI,
+            BookFormat.AZW3,
+            BookFormat.DOCX,
+            BookFormat.FB2,
+            BookFormat.RTF,
+            BookFormat.TXT,
+            BookFormat.HTML,
+            BookFormat.MARKDOWN -> {
+                val res = when (format) {
+                    BookFormat.MOBI, BookFormat.AZW3 -> MobiParser.parse(file, fallbackTitle)
+                    BookFormat.DOCX -> DocxRtfFb2Parser.parseDocx(file, fallbackTitle)
+                    BookFormat.FB2 -> DocxRtfFb2Parser.parseFb2(file, fallbackTitle)
+                    BookFormat.RTF -> DocxRtfFb2Parser.parseRtf(file.readBytes(), fallbackTitle)
+                    BookFormat.TXT -> TextHtmlMdParser.parsePlainText(TextHtmlMdParser.decodeBytes(file.readBytes()), fallbackTitle)
+                    BookFormat.HTML -> TextHtmlMdParser.parseHtml(TextHtmlMdParser.decodeBytes(file.readBytes()), fallbackTitle)
+                    BookFormat.MARKDOWN -> TextHtmlMdParser.parseMarkdown(TextHtmlMdParser.decodeBytes(file.readBytes()), fallbackTitle)
+                    else -> ParsedBookContent.Error("")
+                }
+                if (res is ParsedBookContent.Reflowable) {
+                    if (diskCacheFile != null && res.chapters.isNotEmpty()) {
+                        BookCache.writeToDisk(diskCacheFile, res)
+                    }
+                    res.metadata
+                } else {
+                    ParsedMetadata(title = fallbackTitle)
+                }
+            }
         }
     }
 
@@ -58,7 +75,7 @@ object BookParser {
         }
 
         val parsed = when (format) {
-            BookFormat.EPUB -> EpubParser.parse(file, fallbackTitle, imageCacheDir)
+            BookFormat.EPUB -> EpubParser.parse(file, fallbackTitle, imageCacheDir, skipCover = true)
             BookFormat.MOBI, BookFormat.AZW3 -> MobiParser.parse(file, fallbackTitle)
             BookFormat.DOCX -> DocxRtfFb2Parser.parseDocx(file, fallbackTitle)
             BookFormat.FB2 -> DocxRtfFb2Parser.parseFb2(file, fallbackTitle)
@@ -75,6 +92,35 @@ object BookParser {
             if (diskCacheFile != null) BookCache.writeToDisk(diskCacheFile, parsed)
         }
         return parsed
+    }
+
+    fun compressCoverThumbnail(raw: ByteArray, maxWidth: Int = 640, maxHeight: Int = 960): ByteArray? {
+        if (raw.isEmpty()) return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(raw, 0, raw.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return raw
+        if (bounds.outWidth <= maxWidth && bounds.outHeight <= maxHeight && raw.size <= 160 * 1024) {
+            return raw
+        }
+        var sample = 1
+        while (bounds.outWidth / sample > maxWidth * 2 || bounds.outHeight / sample > maxHeight * 2) {
+            sample *= 2
+        }
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        val decoded = BitmapFactory.decodeByteArray(raw, 0, raw.size, opts) ?: return raw
+        val scale = minOf(maxWidth.toFloat() / decoded.width, maxHeight.toFloat() / decoded.height, 1f)
+        val scaled = if (scale < 0.98f) {
+            val w = (decoded.width * scale).toInt().coerceAtLeast(1)
+            val h = (decoded.height * scale).toInt().coerceAtLeast(1)
+            Bitmap.createScaledBitmap(decoded, w, h, true).also {
+                if (it !== decoded) decoded.recycle()
+            }
+        } else decoded
+        return ByteArrayOutputStream().use { out ->
+            scaled.compress(Bitmap.CompressFormat.JPEG, 82, out)
+            scaled.recycle()
+            out.toByteArray()
+        }
     }
 
     private fun extractPdfMetadata(file: File, fallbackTitle: String): ParsedMetadata {
@@ -111,7 +157,7 @@ object BookParser {
                 val entries = ComicArchiveHelper.listCbzImageNames(zip)
                 val coverBytes = entries.firstOrNull()?.let { name ->
                     zip.getEntry(name)?.let { entry ->
-                        zip.getInputStream(entry).use { compressThumbnail(it.readBytes()) }
+                        zip.getInputStream(entry).use { compressCoverThumbnail(it.readBytes()) }
                     }
                 }
                 ParsedMetadata(
@@ -140,21 +186,5 @@ object BookParser {
             totalUnits = headers.size.coerceAtLeast(1),
             coverBytes = coverBytes
         )
-    }
-
-    private fun compressThumbnail(raw: ByteArray): ByteArray? {
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(raw, 0, raw.size, bounds)
-        var sample = 2
-        while (bounds.outWidth / sample > 600 || bounds.outHeight / sample > 900) {
-            sample *= 2
-        }
-        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-        val bmp = BitmapFactory.decodeByteArray(raw, 0, raw.size, opts) ?: return null
-        return ByteArrayOutputStream().use { out ->
-            bmp.compress(Bitmap.CompressFormat.JPEG, 80, out)
-            bmp.recycle()
-            out.toByteArray()
-        }
     }
 }

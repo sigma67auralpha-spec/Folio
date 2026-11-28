@@ -414,4 +414,71 @@ class ExampleUnitTest {
         assertEquals(1, com.example.ui.screens.findPageForParagraph(pages, 6))
         assertEquals(1, com.example.ui.screens.findPageForParagraph(pages, 99))
     }
+
+    @Test
+    fun htmlParserStripsMixedCaseScriptStyleAndHeadBlocks() {
+        val html = """
+            <HTML><HEAD><TITLE>Hidden Title</TITLE><STYLE>body{margin:0;}</STYLE></HEAD>
+            <BODY>
+              <SCRIPT type="text/javascript">alert("ignored");</SCRIPT>
+              <p>Visible content only.</p>
+            </BODY></HTML>
+        """.trimIndent()
+        val blocks = TextHtmlMdParser.extractHtmlBlocks(html)
+        assertEquals(1, blocks.size)
+        assertEquals("Visible content only.", blocks.first().text)
+    }
+
+    @Test
+    fun comicNaturalSortHandlesLeadingZerosCaseAndHugeNumbers() {
+        val pages = listOf(
+            "Page_10.jpg",
+            "page_002.jpg",
+            "page_01.jpg",
+            "vol_99999999999999999999999.jpg",
+            "vol_100000000000000000000000.jpg"
+        )
+        val sorted = pages.sortedWith(ComicArchiveHelper.naturalComparator)
+        assertEquals(
+            listOf(
+                "page_01.jpg",
+                "page_002.jpg",
+                "Page_10.jpg",
+                "vol_99999999999999999999999.jpg",
+                "vol_100000000000000000000000.jpg"
+            ),
+            sorted
+        )
+    }
+
+    @Test
+    fun parseReflowableContentWritesAndReadsDiskCacheWithoutMemoryKey() {
+        val tempDir = kotlin.io.path.createTempDirectory("folio_parser_cache").toFile()
+        tempDir.deleteOnExit()
+        val sourceFile = File(tempDir, "story.md").apply {
+            writeText("# Chapter One\n\nCached content survives source deletion.")
+        }
+        val cacheFile = File(tempDir, "story_v1.bin")
+
+        val initial = com.example.engine.BookParser.parseReflowableContent(
+            file = sourceFile,
+            format = BookFormat.MARKDOWN,
+            fallbackTitle = "Story",
+            cacheKey = null,
+            diskCacheFile = cacheFile
+        ) as ParsedBookContent.Reflowable
+        assertTrue(cacheFile.exists())
+        assertEquals("Chapter One", initial.metadata.title)
+
+        sourceFile.delete()
+        val cached = com.example.engine.BookParser.parseReflowableContent(
+            file = sourceFile,
+            format = BookFormat.MARKDOWN,
+            fallbackTitle = "Story",
+            cacheKey = null,
+            diskCacheFile = cacheFile
+        ) as ParsedBookContent.Reflowable
+        assertEquals(initial.chapters.size, cached.chapters.size)
+        assertEquals("Cached content survives source deletion.", cached.chapters.first().blocks.last().text)
+    }
 }

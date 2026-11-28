@@ -18,17 +18,24 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import coil.size.Size
 import com.example.data.model.BookEntity
 import com.example.data.model.BookFormat
 import com.example.data.model.FormatCategory
@@ -61,7 +68,8 @@ fun BookCover(
     modifier: Modifier = Modifier,
     showFormatBadge: Boolean = true
 ) {
-    val coverFile = book.coverPath?.let { File(it) }?.takeIf { it.exists() }
+    val coverFile = remember(book.coverPath) { book.coverPath?.let { File(it) } }
+    var coverLoadFailed by remember(book.coverPath) { mutableStateOf(false) }
     val shape = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp, topEnd = 10.dp, bottomEnd = 10.dp)
 
     Box(
@@ -70,11 +78,20 @@ fun BookCover(
             .clip(shape)
             .border(0.8.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f), shape)
     ) {
-        if (coverFile != null) {
+        if (coverFile != null && !coverLoadFailed) {
+            val context = LocalContext.current
+            val imageRequest = remember(coverFile.absolutePath) {
+                ImageRequest.Builder(context)
+                    .data(coverFile)
+                    .size(Size(360, 520))
+                    .crossfade(false)
+                    .build()
+            }
             AsyncImage(
-                model = coverFile,
+                model = imageRequest,
                 contentDescription = "Cover of ${book.title}",
                 contentScale = ContentScale.Crop,
+                onError = { coverLoadFailed = true },
                 modifier = Modifier.fillMaxSize()
             )
         } else {

@@ -101,7 +101,8 @@ object EpubParser {
     fun parse(
         file: File,
         fallbackTitle: String,
-        imageCacheDir: File? = null
+        imageCacheDir: File? = null,
+        skipCover: Boolean = false
     ): ParsedBookContent {
         return runCatching {
             openArchive(file).use { archive ->
@@ -126,13 +127,17 @@ object EpubParser {
 
                 val opf = parseOpf(opfBytes)
 
-                val coverHref = opf.coverItemId?.let { opf.manifest[it]?.href }
-                    ?: opf.manifest.values.firstOrNull {
-                        it.mediaType.startsWith("image/", ignoreCase = true) &&
-                            (it.id.contains("cover", ignoreCase = true) || it.href.contains("cover", ignoreCase = true))
-                    }?.href
-                val coverBytes = coverHref?.let { href ->
-                    archive.getEntryBytes(resolvePath(opfDir, href))
+                val coverBytes = if (skipCover) {
+                    null
+                } else {
+                    val coverHref = opf.coverItemId?.let { opf.manifest[it]?.href }
+                        ?: opf.manifest.values.firstOrNull {
+                            it.mediaType.startsWith("image/", ignoreCase = true) &&
+                                (it.id.contains("cover", ignoreCase = true) || it.href.contains("cover", ignoreCase = true))
+                        }?.href
+                    coverHref?.let { href ->
+                        archive.getEntryBytes(resolvePath(opfDir, href))
+                    }
                 }
 
                 val tocLabels = mutableMapOf<String, String>()
@@ -151,6 +156,13 @@ object EpubParser {
                             tocLabels.putAll(parseNavXhtml(bytes, navDir))
                         }
                     }
+                }
+                val tocByLowerPath = HashMap<String, String>(tocLabels.size)
+                val tocByLowerFilename = HashMap<String, String>(tocLabels.size)
+                tocLabels.forEach { (k, v) ->
+                    val lower = k.lowercase()
+                    tocByLowerPath.putIfAbsent(lower, v)
+                    tocByLowerFilename.putIfAbsent(lower.substringAfterLast('/'), v)
                 }
 
                 val spineItemIds = if (opf.spine.isNotEmpty()) {
@@ -203,9 +215,10 @@ object EpubParser {
                     if (blocks.isEmpty()) return null
 
                     val normalizedFull = normalizePath(fullPath)
+                    val lowerFull = normalizedFull.lowercase()
                     val tocTitle = tocLabels[normalizedFull]
-                        ?: tocLabels.entries.firstOrNull { it.key.equals(normalizedFull, ignoreCase = true) }?.value
-                        ?: tocLabels.entries.firstOrNull { it.key.endsWith("/${normalizedFull.substringAfterLast('/')}", ignoreCase = true) }?.value
+                        ?: tocByLowerPath[lowerFull]
+                        ?: tocByLowerFilename[lowerFull.substringAfterLast('/')]
                     val headingTitle = blocks.firstOrNull {
                         it.style == BlockStyle.HEADING_1 || it.style == BlockStyle.HEADING_2 || it.style == BlockStyle.HEADING_3
                     }?.text

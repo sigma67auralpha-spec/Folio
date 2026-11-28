@@ -17,7 +17,7 @@ object BookCache {
     private const val MAGIC = 0x464F4C43 // "FOLC"
     private const val VERSION = 1
 
-    private val memoryCache = object : LruCache<String, ParsedBookContent.Reflowable>(2) {}
+    private val memoryCache = object : LruCache<String, ParsedBookContent.Reflowable>(4) {}
 
     fun getFromMemory(key: String): ParsedBookContent.Reflowable? = memoryCache.get(key)
 

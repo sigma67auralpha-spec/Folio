@@ -11,11 +11,50 @@ import java.io.File
 
 object PdfPageHelper {
 
+    private val rendererLock = Any()
+    private var cachedKey: String? = null
+    private var cachedPfd: ParcelFileDescriptor? = null
+    private var cachedRenderer: PdfRenderer? = null
+
+    private fun fileCacheKey(file: File): String = "${file.absolutePath}:${file.lastModified()}:${file.length()}"
+
+    private fun closeCachedLocked() {
+        runCatching { cachedRenderer?.close() }
+        runCatching { cachedPfd?.close() }
+        cachedRenderer = null
+        cachedPfd = null
+        cachedKey = null
+    }
+
+    fun closeCachedRenderer() {
+        synchronized(rendererLock) {
+            closeCachedLocked()
+        }
+    }
+
+    private inline fun <T> withRenderer(file: File, block: (PdfRenderer) -> T): T {
+        synchronized(rendererLock) {
+            val key = fileCacheKey(file)
+            if (cachedKey != key || cachedRenderer == null) {
+                closeCachedLocked()
+                val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+                val renderer = try {
+                    PdfRenderer(pfd)
+                } catch (t: Throwable) {
+                    runCatching { pfd.close() }
+                    throw t
+                }
+                cachedPfd = pfd
+                cachedRenderer = renderer
+                cachedKey = key
+            }
+            return block(cachedRenderer!!)
+        }
+    }
+
     fun getPageCount(file: File): Int {
         return runCatching {
-            ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
-                PdfRenderer(pfd).use { it.pageCount }
-            }
+            withRenderer(file) { it.pageCount }
         }.getOrDefault(1)
     }
 
@@ -27,28 +66,26 @@ object PdfPageHelper {
         darkInvert: Boolean
     ): Bitmap? {
         return runCatching {
-            ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
-                PdfRenderer(pfd).use { renderer ->
-                    if (renderer.pageCount == 0) return null
-                    val safeIdx = pageIndex.coerceIn(0, renderer.pageCount - 1)
-                    renderer.openPage(safeIdx).use { page ->
-                        val width = targetWidth.coerceIn(600, 1800)
-                        val height = (width.toFloat() * page.height / page.width.coerceAtLeast(1))
-                            .toInt().coerceAtLeast(1)
-                        val raw = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                        raw.eraseColor(android.graphics.Color.WHITE)
-                        page.render(raw, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+            withRenderer(file) { renderer ->
+                if (renderer.pageCount == 0) return null
+                val safeIdx = pageIndex.coerceIn(0, renderer.pageCount - 1)
+                renderer.openPage(safeIdx).use { page ->
+                    val width = targetWidth.coerceIn(600, 1800)
+                    val height = (width.toFloat() * page.height / page.width.coerceAtLeast(1))
+                        .toInt().coerceAtLeast(1)
+                    val raw = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                    raw.eraseColor(android.graphics.Color.WHITE)
+                    page.render(raw, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
 
-                        val cropped = if (cropMargins) cropWhiteMargins(raw) else raw
-                        if (cropped !== raw) raw.recycle()
+                    val cropped = if (cropMargins) cropWhiteMargins(raw) else raw
+                    if (cropped !== raw) raw.recycle()
 
-                        if (darkInvert) {
-                            val inverted = invertBitmap(cropped)
-                            cropped.recycle()
-                            inverted
-                        } else {
-                            cropped
-                        }
+                    if (darkInvert) {
+                        val inverted = invertBitmap(cropped)
+                        cropped.recycle()
+                        inverted
+                    } else {
+                        cropped
                     }
                 }
             }
@@ -58,7 +95,8 @@ object PdfPageHelper {
     private fun cropWhiteMargins(source: Bitmap): Bitmap {
         val w = source.width
         val h = source.height
-        val rowPixels = IntArray(w)
+        val pixels = IntArray(w * h)
+        source.getPixels(pixels, 0, w, 0, 0, w, h)
 
         var minX = w
         var maxX = -1
@@ -68,10 +106,10 @@ object PdfPageHelper {
 
         var y = 0
         while (y < h) {
-            source.getPixels(rowPixels, 0, w, 0, y, w, 1)
+            val rowOffset = y * w
             var x = 0
             while (x < w) {
-                val c = rowPixels[x]
+                val c = pixels[rowOffset + x]
                 val r = (c shr 16) and 0xFF
                 val g = (c shr 8) and 0xFF
                 val b = c and 0xFF

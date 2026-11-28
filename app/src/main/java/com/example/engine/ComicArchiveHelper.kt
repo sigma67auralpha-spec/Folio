@@ -13,9 +13,32 @@ data class RarImageHeader(val name: String, val dataOffset: Long, val packedSize
 object ComicArchiveHelper {
 
     private val imageExts = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp")
-    private val NATURAL_TOKEN_REGEX = Regex("(\\d+|\\D+)")
     private val cbzIndexCache = object : LruCache<String, List<String>>(4) {}
     private val cbrIndexCache = object : LruCache<String, List<RarImageHeader>>(4) {}
+
+    private val cbzZipLock = Any()
+    private var cachedZipKey: String? = null
+    private var cachedZipFile: ZipFile? = null
+
+    fun closeCachedArchives() {
+        synchronized(cbzZipLock) {
+            runCatching { cachedZipFile?.close() }
+            cachedZipFile = null
+            cachedZipKey = null
+        }
+    }
+
+    private inline fun <T> withCbzZip(file: File, block: (ZipFile) -> T): T {
+        synchronized(cbzZipLock) {
+            val key = "${file.absolutePath}:${file.lastModified()}:${file.length()}"
+            if (cachedZipKey != key || cachedZipFile == null) {
+                runCatching { cachedZipFile?.close() }
+                cachedZipFile = ZipFile(file)
+                cachedZipKey = key
+            }
+            return block(cachedZipFile!!)
+        }
+    }
 
     fun listCbzImageNames(zip: ZipFile): List<String> {
         return zip.entries().asSequence()
@@ -31,7 +54,7 @@ object ComicArchiveHelper {
 
     fun getCbzPageCount(file: File): Int {
         return runCatching {
-            ZipFile(file).use { zip -> getCachedCbzNames(file, zip).size }
+            withCbzZip(file) { zip -> getCachedCbzNames(file, zip).size }
         }.getOrDefault(0)
     }
 
@@ -42,13 +65,13 @@ object ComicArchiveHelper {
 
     fun loadCbzPageBitmap(file: File, pageIndex: Int): Bitmap? {
         return runCatching {
-            ZipFile(file).use { zip ->
+            val bytes = withCbzZip(file) { zip ->
                 val names = getCachedCbzNames(file, zip)
                 val targetName = names.getOrNull(pageIndex) ?: return null
                 val entry = zip.getEntry(targetName) ?: return null
-                val bytes = zip.getInputStream(entry).use { it.readBytes() }
-                decodeBoundedBitmap(bytes)
+                zip.getInputStream(entry).use { it.readBytes() }
             }
+            decodeBoundedBitmap(bytes)
         }.getOrNull()
     }
 
@@ -165,17 +188,41 @@ object ComicArchiveHelper {
             ((bytes[offset + 3].toLong() and 0xFF) shl 24)
 
     val naturalComparator: Comparator<String> = Comparator { a, b ->
-        val partsA = NATURAL_TOKEN_REGEX.findAll(a).map { it.value }.toList()
-        val partsB = NATURAL_TOKEN_REGEX.findAll(b).map { it.value }.toList()
-        val count = minOf(partsA.size, partsB.size)
-        for (i in 0 until count) {
-            val sa = partsA[i]
-            val sb = partsB[i]
-            val na = sa.toLongOrNull()
-            val nb = sb.toLongOrNull()
-            val cmp = if (na != null && nb != null) na.compareTo(nb) else sa.compareTo(sb, ignoreCase = true)
-            if (cmp != 0) return@Comparator cmp
+        var i = 0
+        var j = 0
+        val lenA = a.length
+        val lenB = b.length
+        while (i < lenA && j < lenB) {
+            val chA = a[i]
+            val chB = b[j]
+            if (chA.isDigit() && chB.isDigit()) {
+                val startA = i
+                while (i < lenA && a[i].isDigit()) i++
+                val startB = j
+                while (j < lenB && b[j].isDigit()) j++
+
+                var nzA = startA
+                while (nzA < i && a[nzA] == '0') nzA++
+                var nzB = startB
+                while (nzB < j && b[nzB] == '0') nzB++
+
+                val sigLenA = i - nzA
+                val sigLenB = j - nzB
+                if (sigLenA != sigLenB) return@Comparator sigLenA.compareTo(sigLenB)
+
+                for (k in 0 until sigLenA) {
+                    val dCmp = a[nzA + k].compareTo(b[nzB + k])
+                    if (dCmp != 0) return@Comparator dCmp
+                }
+                val rawLenCmp = (i - startA).compareTo(j - startB)
+                if (rawLenCmp != 0) return@Comparator rawLenCmp
+            } else {
+                val cmp = chA.lowercaseChar().compareTo(chB.lowercaseChar())
+                if (cmp != 0) return@Comparator cmp
+                i++
+                j++
+            }
         }
-        partsA.size.compareTo(partsB.size)
+        lenA.compareTo(lenB)
     }
 }

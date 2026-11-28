@@ -95,7 +95,9 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -187,6 +189,8 @@ import com.example.ui.theme.RobotoSlabFontFamily
 import com.example.ui.viewmodel.ReaderContentState
 import com.example.ui.viewmodel.ReaderViewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
@@ -206,23 +210,6 @@ fun ReaderScreen(
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner, bookId) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_RESUME -> readerViewModel.setReaderForeground(true)
-                Lifecycle.Event.ON_PAUSE -> readerViewModel.setReaderForeground(false)
-                else -> Unit
-            }
-        }
-        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
-            readerViewModel.setReaderForeground(true)
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-            readerViewModel.setReaderForeground(false)
-        }
-    }
 
     val book by readerViewModel.book.collectAsStateWithLifecycle()
     val contentState by readerViewModel.contentState.collectAsStateWithLifecycle()
@@ -383,6 +370,50 @@ fun ReaderScreen(
         pagedScrollFraction
     } else {
         scrollFraction
+    }
+    val latestScrollFraction by rememberUpdatedState(activeScrollFraction)
+    val latestIsReflowable by rememberUpdatedState(contentState is ReaderContentState.Reflowable)
+    val latestRestoredInitialScroll by rememberUpdatedState(restoredInitialScroll)
+
+    DisposableEffect(lifecycleOwner, bookId) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> readerViewModel.setReaderForeground(true)
+                Lifecycle.Event.ON_PAUSE -> {
+                    if (latestIsReflowable && latestRestoredInitialScroll) {
+                        readerViewModel.saveScrollProgress(latestScrollFraction)
+                    }
+                    readerViewModel.setReaderForeground(false)
+                }
+                else -> Unit
+            }
+        }
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            readerViewModel.setReaderForeground(true)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            if (latestIsReflowable && latestRestoredInitialScroll) {
+                readerViewModel.saveScrollProgress(latestScrollFraction)
+            }
+            readerViewModel.setReaderForeground(false)
+        }
+    }
+
+    LaunchedEffect(bookId, currentUnit, prefs.readingMode, contentState is ReaderContentState.Reflowable) {
+        if (contentState is ReaderContentState.Reflowable) {
+            snapshotFlow {
+                if (prefs.readingMode == ReaderReadingMode.PAGED) pagedScrollFraction else scrollFraction
+            }
+                .drop(1)
+                .collectLatest { frac ->
+                    delay(1500L)
+                    if (restoredInitialScroll) {
+                        readerViewModel.saveScrollProgress(frac)
+                    }
+                }
+        }
     }
 
     LaunchedEffect(contentState is ReaderContentState.Reflowable, prefs.readingMode) {
@@ -778,12 +809,13 @@ fun ReaderScreen(
                                         }
                                     }
 
-                                    LaunchedEffect(pagerState.currentPage, pages.size, currentUnit, state.chapters.size) {
+                                    LaunchedEffect(pagerState, pages.size, currentUnit, state.chapters.size) {
                                         onStepForward = {
                                             readerViewModel.recordUserReadingActivity()
-                                            if (pagerState.currentPage < pages.lastIndex) {
+                                            val page = pagerState.currentPage
+                                            if (page < pages.lastIndex) {
                                                 coroutineScope.launch {
-                                                    pagerState.animateScrollToPage(pagerState.currentPage + 1)
+                                                    pagerState.animateScrollToPage(page + 1)
                                                 }
                                             } else {
                                                 readerViewModel.nextUnit()
@@ -791,9 +823,10 @@ fun ReaderScreen(
                                         }
                                         onStepBackward = {
                                             readerViewModel.recordUserReadingActivity()
-                                            if (pagerState.currentPage > 0) {
+                                            val page = pagerState.currentPage
+                                            if (page > 0) {
                                                 coroutineScope.launch {
-                                                    pagerState.animateScrollToPage(pagerState.currentPage - 1)
+                                                    pagerState.animateScrollToPage(page - 1)
                                                 }
                                             } else if (currentUnit > 0) {
                                                 pendingJumpToLastPage = true

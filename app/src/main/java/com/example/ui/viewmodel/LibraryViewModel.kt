@@ -19,11 +19,13 @@ import com.example.data.model.ReadingSessionEntity
 import com.example.data.model.ShelfEntity
 import com.example.data.model.TagEntity
 import com.example.data.model.WatchedFolderEntity
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -89,23 +91,13 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         CoreFlows(books, shelves, tags, sessions, folders)
     }
 
-    val uiState: StateFlow<LibraryUiState> = combine(
+    private val computedLibraryState = combine(
         coreFlows,
         prefsRepository.preferencesFlow,
         _searchQuery,
         _activeFilter,
-        _activeTagFilter,
-        _isImporting,
-        _statusMessage
-    ) { arr ->
-        val core = arr[0] as CoreFlows
-        val prefs = arr[1] as ReaderPreferences
-        val query = arr[2] as String
-        val filter = arr[3] as LibraryFilterChip
-        val tagFilter = arr[4] as String?
-        val importing = arr[5] as Boolean
-        val message = arr[6] as String?
-
+        _activeTagFilter
+    ) { core, prefs, query, filter, tagFilter ->
         val filtered = applyFilterAndSort(core.books, query, filter, tagFilter, prefs.librarySortOrder)
         val continueBook = core.books
             .filter { it.book.lastOpenedAt != null && it.book.readStatus != ReadStatus.FINISHED }
@@ -123,10 +115,16 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
             preferences = prefs,
             searchQuery = query,
             activeFilter = filter,
-            activeTagFilter = tagFilter,
-            isImporting = importing,
-            statusMessage = message
+            activeTagFilter = tagFilter
         )
+    }.flowOn(Dispatchers.Default)
+
+    val uiState: StateFlow<LibraryUiState> = combine(
+        computedLibraryState,
+        _isImporting,
+        _statusMessage
+    ) { base, importing, message ->
+        base.copy(isImporting = importing, statusMessage = message)
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),

@@ -202,9 +202,9 @@ object TextHtmlMdParser {
     ): List<ParagraphBlock> {
         val cleaned = html
             .let { if ("<!--" in it) it.replace(HTML_COMMENT_REGEX, "") else it }
-            .let { if ("<script" in it || "<SCRIPT" in it) it.replace(HTML_SCRIPT_REGEX, "") else it }
-            .let { if ("<style" in it || "<STYLE" in it) it.replace(HTML_STYLE_REGEX, "") else it }
-            .let { if ("<head" in it || "<HEAD" in it) it.replace(HTML_HEAD_REGEX, "") else it }
+            .let { if (it.contains("<script", ignoreCase = true)) it.replace(HTML_SCRIPT_REGEX, "") else it }
+            .let { if (it.contains("<style", ignoreCase = true)) it.replace(HTML_STYLE_REGEX, "") else it }
+            .let { if (it.contains("<head", ignoreCase = true)) it.replace(HTML_HEAD_REGEX, "") else it }
 
         val blocks = mutableListOf<ParagraphBlock>()
         val currentText = StringBuilder()
